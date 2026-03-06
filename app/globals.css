@@ -126,22 +126,65 @@ body {
   animation: speakerPulse 0.8s ease-in-out infinite;
 }
 
+/* ── Lyrics scroll (room mode) ── */
+@keyframes lyricsScroll {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(var(--ly-offset, 0));
+  }
+}
+
+@keyframes lyricsFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.lyrics-enter {
+  animation: lyricsFadeIn 0.5s ease-out forwards;
+}
+
+/* ── Diamond float animation ── */
+@keyframes diamondFloat {
+  0% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  80% {
+    opacity: 1;
+    transform: translateY(-18px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-24px);
+  }
+}
+.diamond-float {
+  animation: diamondFloat 1.2s ease-out forwards;
+}
+
 /* ── Device scaling ── */
 .device-scale-wrapper {
-  --device-w: 332px;
-  --device-h: 560px;
+  --device-w: 260px;
+  --device-h: 432px;
   width: var(--device-w);
   height: var(--device-h);
   transform-origin: center center;
 }
 
-@media (max-height: 620px) {
+@media (max-height: 492px) {
   .device-scale-wrapper {
-    transform: scale(calc(95dvh / 560));
+    transform: scale(calc(95dvh / 432));
   }
 }
-@media (max-width: 360px) {
+@media (max-width: 296px) {
   .device-scale-wrapper {
-    transform: scale(calc(90vw / 332));
+    transform: scale(calc(90vw / 260));
   }
 }

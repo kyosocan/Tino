@@ -7,7 +7,7 @@ export type Message = {
   timestamp: number;
 };
 
-export type AppMode = "companion" | "matching" | "room";
+export type AppMode = "onboarding" | "companion" | "matching" | "room" | "shop";
 
 export type RoomPhase = "icebreaking" | "free_chat" | "game" | "summary";
 

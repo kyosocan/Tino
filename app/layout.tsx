@@ -23,7 +23,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body className="font-sans bg-[#1a1a2e] antialiased">
-        <div className="h-dvh w-full flex items-center justify-center overflow-hidden">
+        <div className="h-dvh w-full flex items-center justify-center">
           {children}
         </div>
       </body>

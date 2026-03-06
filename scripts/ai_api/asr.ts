@@ -36,7 +36,7 @@ export async function recognizeAsr(input: AsrInput) {
       user: { uid: appId },
       audio: {
         data: audioBase64,
-        format: mimeType?.replace("audio/", "") || "webm"
+        format: mimeType?.replace("audio/", "").split(";")[0] || "webm"
       },
       request: { model_name: "bigmodel" }
     })

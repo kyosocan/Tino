@@ -54,6 +54,85 @@ function extractText(data: ArkResponse): string {
   return msg?.content?.find((c) => c.type === "output_text")?.text?.trim() || "";
 }
 
+export async function callDoubaoStream(
+  messages: ChatMessage[]
+): Promise<ReadableStream<Uint8Array>> {
+  const cfg = getArkConfig();
+  const input = toArkInput(messages);
+  const encoder = new TextEncoder();
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+
+  const response = await fetch(ARK_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${cfg.apiKey}`,
+    },
+    body: JSON.stringify({ model: cfg.model, input, stream: true }),
+    signal: controller.signal,
+  });
+
+  if (!response.ok || !response.body) {
+    clearTimeout(timeout);
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Ark stream 失败 ${response.status}: ${detail}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let lineBuf = "";
+
+  return new ReadableStream({
+    async pull(ctrl) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          clearTimeout(timeout);
+          if (lineBuf.startsWith("data:")) {
+            const jsonStr = lineBuf.slice(5).trim();
+            if (jsonStr && jsonStr !== "[DONE]") {
+              try {
+                const evt = JSON.parse(jsonStr);
+                if (evt.type === "response.output_text.delta" && evt.delta) {
+                  ctrl.enqueue(encoder.encode(evt.delta));
+                }
+              } catch { /* skip */ }
+            }
+          }
+          ctrl.close();
+          return;
+        }
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = (lineBuf + chunk).split("\n");
+        lineBuf = lines.pop() || "";
+
+        let enqueued = false;
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const jsonStr = line.slice(5).trim();
+          if (!jsonStr || jsonStr === "[DONE]") continue;
+          try {
+            const evt = JSON.parse(jsonStr);
+            if (evt.type === "response.output_text.delta" && evt.delta) {
+              ctrl.enqueue(encoder.encode(evt.delta));
+              enqueued = true;
+            }
+          } catch { /* skip */ }
+        }
+
+        if (enqueued) return;
+      }
+    },
+    cancel() {
+      clearTimeout(timeout);
+      reader.cancel().catch(() => {});
+    },
+  });
+}
+
 export async function callDoubao(messages: ChatMessage[]) {
   const cfg = getArkConfig();
   const input = toArkInput(messages);
