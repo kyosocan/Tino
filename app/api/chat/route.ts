@@ -3,27 +3,63 @@ import {
   type ChatMessage,
 } from "@/scripts/ai_api/doubao";
 
-const TINO_SYSTEM_PROMPT = `你是 Tino，一只来自"语言星球"的可爱小狐狸。你正在学习人类的语言，最喜欢和小朋友做朋友！
+const TINO_SYSTEM_PROMPT = `你是 Tino，一个友好的英语聊天小助手。你的任务是教小朋友如何用英文和其他小朋友聊天。
 
 性格特点：
-- 好奇心满满，喜欢问问题
-- 有点小调皮，会开玩笑
-- 总是鼓励小朋友，从不批评
+- 温暖友好，像一个好朋友
+- 耐心鼓励，从不批评
 - 说话简短可爱
 
 聊天规则：
-1. 主要用中文聊天（约70%），自然地穿插英文（约30%）
-2. 自然地在对话中用英文短语，比如 "That's awesome!" "So cool!" "I like that too!"
-3. 聊天过程中偶尔（大约每4-5轮）用轻松自然的方式让小朋友说一句英文，比如"这个用英文怎么说呀？"、"你能用English说说你喜欢什么吗？"，方式要多样不重复
-4. 当小朋友说了英文，简单夸一下就好，比如"好棒！"、"说得真好！"
+1. 主要用中文和小朋友聊天（约70%），自然地穿插英文表达（约30%）
+2. 经常教小朋友实用的英文聊天用语，比如打招呼（"Hi! How are you?"）、问问题（"What do you like?"）、表达喜好（"I like..."）等
+3. 每隔几轮，自然地引导小朋友练习一句英文对话，比如"如果你想问别人喜欢什么，可以说 What do you like?"
+4. 当小朋友说了英文，简单夸一下："好棒！说得真好！"
 5. 每条回复最多2-3句话，保持简短
 6. 多用问句保持对话活跃，聊孩子感兴趣的话题
-7. 绝对不要：解释语法、打分、评价对错、长篇大论、反复让孩子跟读、提及钻石或积分
+7. 不要：解释语法、打分、评价对错、长篇大论、反复让孩子跟读
 8. 可以用可爱的表达，如"哇！""好棒！""嘻嘻"
 9. 回复只用纯文本，不要用JSON或markdown格式`;
 
 const ENGLISH_HINT =
-  "这一轮可以自然地多用一些英文，或者轻松地问小朋友一个可以用英文回答的简单问题，但不要强迫。保持聊天有趣自然。";
+  "这一轮可以教小朋友一个实用的英文聊天句子，比如和其他小朋友打招呼、问问题、表达想法的句子。方式要自然轻松。";
+
+function buildMemoryPrompt(memory?: {
+  memories?: string[];
+  weaknessNotes?: string[];
+  totalMessages?: number;
+  totalEnglishTurns?: number;
+}) {
+  if (!memory) return "";
+
+  const sections: string[] = [];
+
+  if (memory.memories && memory.memories.length > 0) {
+    sections.push(
+      `你们之前聊过、可以偶尔自然提起的共同记忆：${memory.memories
+        .slice(0, 4)
+        .join("；")}`
+    );
+  }
+
+  if (memory.weaknessNotes && memory.weaknessNotes.length > 0) {
+    sections.push(
+      `这个孩子当前英语上的薄弱点：${memory.weaknessNotes.join("；")}`
+    );
+  }
+
+  if ((memory.totalMessages || 0) > 0) {
+    sections.push(
+      `你已经和 ta 聊过 ${memory.totalMessages} 轮，其中 ta 主动说英文的轮数大约是 ${
+        memory.totalEnglishTurns || 0
+      }。`
+    );
+  }
+
+  if (sections.length === 0) return "";
+
+  return `\n\n长期陪伴信息：\n- ${sections.join("\n- ")}\n- 使用这些信息时要自然，像老朋友一样偶尔提起，不要每轮都复述，不要显得像在念档案。`;
+}
 
 const FALLBACK_RESPONSES = [
   "哈哈，有趣！Tell me more! 你还想聊什么呀？",
@@ -41,13 +77,26 @@ export async function POST(req: Request) {
       turnCount,
       userName,
       userGrade,
-    }: { messages: { sender: string; content: string }[]; turnCount: number; userName?: string; userGrade?: number } =
+      userMemory,
+    }: {
+      messages: { sender: string; content: string }[];
+      turnCount: number;
+      userName?: string;
+      userGrade?: number;
+      userMemory?: {
+        memories?: string[];
+        weaknessNotes?: string[];
+        totalMessages?: number;
+        totalEnglishTurns?: number;
+      };
+    } =
       body;
 
     let systemPrompt = TINO_SYSTEM_PROMPT;
     if (userName) {
       systemPrompt += `\n\n你正在和${userName}聊天，ta是${userGrade || ""}年级的小朋友。记住ta的名字，聊天中自然地称呼ta。`;
     }
+    systemPrompt += buildMemoryPrompt(userMemory);
 
     const chatMessages: ChatMessage[] = [
       { role: "system", content: systemPrompt },

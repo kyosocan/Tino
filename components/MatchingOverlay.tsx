@@ -2,23 +2,23 @@
 
 import { useState, useEffect } from "react";
 import TinoAvatar from "./TinoAvatar";
-import type { VirtualFriend } from "@/lib/types";
+import type { RoomPartner } from "@/lib/types";
 
 const MATCH_DURATION = 3000;
+
+type LegacyFriend = RoomPartner & { englishName?: string; likes?: string[] };
 
 export default function MatchingOverlay({
   onMatched,
 }: {
-  onMatched: (friend: VirtualFriend) => void;
+  onMatched: (friend: LegacyFriend) => void;
 }) {
   const [phase, setPhase] = useState<"searching" | "found">("searching");
-  const [friend] = useState<VirtualFriend>(() => {
-    const friends: VirtualFriend[] = [
-      { name: "小星", englishName: "Star", grade: 3, likes: ["画画", "跑步"] },
-      { name: "小月", englishName: "Luna", grade: 2, likes: ["唱歌", "跳舞"] },
-      { name: "小云", englishName: "Cloud", grade: 3, likes: ["阅读", "足球"] },
-      { name: "小晨", englishName: "Dawn", grade: 2, likes: ["乐高", "篮球"] },
-      { name: "小禾", englishName: "Sunny", grade: 3, likes: ["钢琴", "游泳"] },
+  const [friend] = useState<LegacyFriend>(() => {
+    const friends: LegacyFriend[] = [
+      { userId: "legacy1", name: "小星", grade: 3 },
+      { userId: "legacy2", name: "小月", grade: 2 },
+      { userId: "legacy3", name: "小云", grade: 3 },
     ];
     return friends[Math.floor(Math.random() * friends.length)];
   });

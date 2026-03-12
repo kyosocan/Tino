@@ -1,7 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { Message, RoomPhase, VirtualFriend } from "@/lib/types";
+import type { Message } from "@/lib/types";
+
+type RoomPhase = "icebreaking" | "free_chat" | "game" | "summary";
+type VirtualFriend = { name: string; englishName: string; grade: number; likes: string[] };
 import TinoAvatar from "./TinoAvatar";
 import ChatBubble from "./ChatBubble";
 import ChatInput from "./ChatInput";

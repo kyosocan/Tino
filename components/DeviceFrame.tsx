@@ -104,26 +104,26 @@ export default function DeviceFrame({
       {/* Flex layout: [left btns] [device body] [right btn] */}
       <div className="flex" style={{ width: 260, height: 432 }}>
         {/* ── Left side buttons ── */}
-        <div className="relative flex-shrink-0" style={{ width: 22 }}>
+        <div className="relative flex-shrink-0" style={{ width: 12 }}>
           <div
             ref={powerRef}
             role="button"
             tabIndex={0}
-            className={`absolute ${btnBase} w-[12px] h-[30px] rounded-l-[3px]`}
+            className={`absolute ${btnBase} w-full h-[30px] rounded-l-[3px]`}
             style={{ top: "9%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
           />
           <div
             ref={volUpRef}
             role="button"
             tabIndex={0}
-            className={`absolute ${btnBase} w-[12px] h-[38px] rounded-l-[3px]`}
+            className={`absolute ${btnBase} w-full h-[38px] rounded-l-[3px]`}
             style={{ top: "22%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
           />
           <div
             ref={volDownRef}
             role="button"
             tabIndex={0}
-            className={`absolute ${btnBase} w-[12px] h-[38px] rounded-l-[3px]`}
+            className={`absolute ${btnBase} w-full h-[38px] rounded-l-[3px]`}
             style={{ top: "35%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
           />
         </div>

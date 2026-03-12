@@ -6,51 +6,36 @@ import TinoAvatar from "@/components/TinoAvatar";
 import type {
   Message,
   AppMode,
-  VirtualFriend,
+  RoomPartner,
   MessageSender,
 } from "@/lib/types";
 
 /* ───────── constants ───────── */
 
-const GREETING = "嗨！我是 Tino～\n今天想聊什么呀？";
-
-const AI2_NAME = "嘟嘟";
-const AI2_EMOJI = "🐰";
-
-const FRIENDS: VirtualFriend[] = [
-  { name: "小星", englishName: "Star", grade: 3, likes: ["画画", "跑步"] },
-  { name: "小月", englishName: "Luna", grade: 2, likes: ["唱歌", "跳舞"] },
-  { name: "小云", englishName: "Cloud", grade: 3, likes: ["阅读", "足球"] },
-  { name: "小晨", englishName: "Dawn", grade: 2, likes: ["乐高", "篮球"] },
-];
+const GREETING = "嗨！我是 Tino～\n你的英语聊天小助手！\n今天先来一句：How is your day going?";
 
 const ROOM_DURATION = 300;
 
-function getPhase(elapsed: number) {
-  if (elapsed < 30) return "icebreaking" as const;
-  if (elapsed < 240) return "free_chat" as const;
-  if (elapsed < 270) return "game" as const;
-  return "summary" as const;
-}
-
 const GLOW: Record<string, string> = {
   tino: "rgba(255,140,66,0.7)",
-  ai2: "rgba(167,139,250,0.7)",
   user: "rgba(126,200,227,0.7)",
   friend: "rgba(168,213,186,0.7)",
 };
 
-/* ───────── scoring ───────── */
+type CompanionMemory = {
+  memories: string[];
+  totalMessages: number;
+  totalEnglishTurns: number;
+  totalChineseTurns: number;
+  totalQuestionTurns: number;
+  totalEnglishWords: number;
+  lastUpdatedAt: number;
+};
 
-function parseGradeFromSpeech(text: string): number {
-  const t = text.replace(/\s/g, "").trim();
-  const n = ["一", "二", "三", "四", "五", "六"];
-  for (let i = 0; i < 6; i++) {
-    if (t.includes(n[i]) || t === String(i + 1)) return i + 1;
-  }
-  const m = t.match(/[1-6]/);
-  if (m) return Number(m[0]);
-  return 0;
+/* ───────── helpers ───────── */
+
+function containsChinese(text: string): boolean {
+  return /[\u4e00-\u9fa5]/.test(text);
 }
 
 function scoreEnglish(text: string): number {
@@ -64,6 +49,142 @@ function scoreEnglish(text: string): number {
   }
   if (/[A-Z][a-z].*\s[a-z]/.test(text) && words.length >= 3) score += 2;
   return score;
+}
+
+function generateUserId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `u_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createEmptyCompanionMemory(): CompanionMemory {
+  return {
+    memories: [],
+    totalMessages: 0,
+    totalEnglishTurns: 0,
+    totalChineseTurns: 0,
+    totalQuestionTurns: 0,
+    totalEnglishWords: 0,
+    lastUpdatedAt: 0,
+  };
+}
+
+function getCompanionMemoryKey(name: string, grade: number): string {
+  return `tino_companion_memory_${name.trim()}_${grade}`;
+}
+
+function loadCompanionMemory(name: string, grade: number): CompanionMemory {
+  try {
+    const raw = localStorage.getItem(getCompanionMemoryKey(name, grade));
+    if (!raw) return createEmptyCompanionMemory();
+    const parsed = JSON.parse(raw) as Partial<CompanionMemory>;
+    return {
+      ...createEmptyCompanionMemory(),
+      ...parsed,
+      memories: Array.isArray(parsed.memories) ? parsed.memories.slice(0, 6) : [],
+    };
+  } catch {
+    return createEmptyCompanionMemory();
+  }
+}
+
+function persistCompanionMemory(
+  name: string,
+  grade: number,
+  memory: CompanionMemory
+) {
+  try {
+    localStorage.setItem(
+      getCompanionMemoryKey(name, grade),
+      JSON.stringify(memory)
+    );
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function pickMemorySnippet(text: string): string | null {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (cleaned.length < 4) return null;
+  if (/[?？]$/.test(cleaned) && cleaned.length < 12) return null;
+
+  const meaningfulPattern =
+    /(我叫|我是|我喜欢|我最喜欢|今天|因为|想要|my name is|i am|i'm|i like|i love|my favorite|today|because)/i;
+  const englishWords = cleaned.match(/[a-zA-Z]{2,}/g) || [];
+
+  if (!meaningfulPattern.test(cleaned) && englishWords.length < 4 && cleaned.length < 10) {
+    return null;
+  }
+
+  return cleaned.slice(0, 48);
+}
+
+function updateCompanionMemory(
+  prev: CompanionMemory,
+  text: string
+): CompanionMemory {
+  const englishWords = text.match(/[a-zA-Z]{2,}/g) || [];
+  const hasEnglish = englishWords.length > 0;
+  const hasChinese = containsChinese(text);
+  const hasQuestion = /[?？]/.test(text);
+  const snippet = pickMemorySnippet(text);
+  const nextMemories = snippet
+    ? [snippet, ...prev.memories.filter((item) => item !== snippet)].slice(0, 6)
+    : prev.memories;
+
+  return {
+    memories: nextMemories,
+    totalMessages: prev.totalMessages + 1,
+    totalEnglishTurns: prev.totalEnglishTurns + (hasEnglish ? 1 : 0),
+    totalChineseTurns: prev.totalChineseTurns + (hasChinese ? 1 : 0),
+    totalQuestionTurns: prev.totalQuestionTurns + (hasQuestion ? 1 : 0),
+    totalEnglishWords: prev.totalEnglishWords + englishWords.length,
+    lastUpdatedAt: Date.now(),
+  };
+}
+
+function deriveWeaknessNotes(memory: CompanionMemory): string[] {
+  if (memory.totalMessages === 0) return [];
+
+  const notes: string[] = [];
+  const englishRatio =
+    memory.totalMessages > 0
+      ? memory.totalEnglishTurns / memory.totalMessages
+      : 0;
+  const avgEnglishWords =
+    memory.totalEnglishTurns > 0
+      ? memory.totalEnglishWords / memory.totalEnglishTurns
+      : 0;
+  const questionRatio =
+    memory.totalMessages > 0
+      ? memory.totalQuestionTurns / memory.totalMessages
+      : 0;
+
+  if (memory.totalEnglishTurns === 0 || englishRatio < 0.35) {
+    notes.push("还不太敢主动连续说英文，可以多给打招呼和自我介绍的句型支架。");
+  }
+  if (memory.totalEnglishTurns > 0 && avgEnglishWords < 4) {
+    notes.push("英文表达偏短，可以多引导 ta 用完整句子表达想法。");
+  }
+  if (questionRatio < 0.18) {
+    notes.push("不太主动提问，可以多示范 How/What/Do you like... 这类问句。");
+  }
+
+  return notes.slice(0, 2);
+}
+
+function buildCompanionGreeting(
+  name: string,
+  memory: CompanionMemory
+): string {
+  const remembered = memory.memories[0];
+
+  if (remembered) {
+    return `嗨，${name}！我还记得你之前提过“${remembered}”。\n我们接着这个话题聊聊吧，你可以先试着说：I still remember that!`;
+  }
+
+  return `嗨，${name}！今天我们先练一句很自然的英文：How is your day going?\n你可以先跟我说说今天最开心的一件小事。`;
 }
 
 /* ───────── avatar frames ───────── */
@@ -87,28 +208,29 @@ export default function Home() {
   const [showVolume, setShowVolume] = useState(false);
 
   /* user profile */
+  const [userId, setUserId] = useState("");
   const [userName, setUserName] = useState("");
   const [userGrade, setUserGrade] = useState(0);
-  const [onboardStep, setOnboardStep] = useState(0);
-  const [onboardHeard, setOnboardHeard] = useState("");
-  const onboardStepRef = useRef(0);
-  const userNameRef = useRef("");
-  const userGradeRef = useRef(0);
-  useEffect(() => { onboardStepRef.current = onboardStep; }, [onboardStep]);
-  useEffect(() => { userNameRef.current = userName; }, [userName]);
-  useEffect(() => { userGradeRef.current = userGrade; }, [userGrade]);
+  const [loginName, setLoginName] = useState("");
+  const [loginGrade, setLoginGrade] = useState(0);
 
   /* mode */
-  const [mode, setMode] = useState<AppMode>("companion");
-  const [friend, setFriend] = useState<VirtualFriend | null>(null);
+  const [mode, setMode] = useState<AppMode>("login");
+  const modeRef = useRef<AppMode>("login");
+  useEffect(() => { modeRef.current = mode; }, [mode]);
 
-  /* chat context (internal, not rendered as list in companion) */
+  /* partner (real person) */
+  const [partner, setPartner] = useState<RoomPartner | null>(null);
+  const [roomId, setRoomId] = useState("");
+
+  /* chat context */
   const [companionMsgs, setCompanionMsgs] = useState<Message[]>([
     { id: "g", sender: "tino", content: GREETING, timestamp: Date.now() },
   ]);
   const [roomMsgs, setRoomMsgs] = useState<Message[]>([]);
   const [turnCount, setTurnCount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
+  const companionMemoryRef = useRef<CompanionMemory>(createEmptyCompanionMemory());
 
   /* companion display */
   const [displayText, setDisplayText] = useState(GREETING);
@@ -124,14 +246,22 @@ export default function Home() {
   const [englishCount, setEnglishCount] = useState(0);
   const [roomDisplay, setRoomDisplay] = useState<{ sender: string; content: string } | null>(null);
   const [sessionDiamonds, setSessionDiamonds] = useState(0);
-  const [friendDiamonds, setFriendDiamonds] = useState(0);
-  const [friendDiamondDelta, setFriendDiamondDelta] = useState<number | null>(null);
-  const roomTurnRef = useRef(0);
-  const gameRef = useRef(false);
-  const summaryRef = useRef(false);
-  const introRef = useRef(false);
   const endedRef = useRef(false);
-  const moderatorRef = useRef<"tino" | "ai2">("tino");
+
+  /* room polling */
+  const pollTimerRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const lastPollTimeRef = useRef(0);
+  const seenMsgIds = useRef(new Set<string>());
+
+  /* match polling */
+  const matchPollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+
+  /* translation popup */
+  const [translationPopup, setTranslationPopup] = useState<{
+    chinese: string;
+    english: string;
+    loading: boolean;
+  } | null>(null);
 
   /* exit confirmation */
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -156,13 +286,26 @@ export default function Home() {
       if (o) setOwnedFrames(JSON.parse(o));
       const a = localStorage.getItem("tino_active_frame");
       if (a) setActiveFrame(a);
+
+      localStorage.removeItem("tino_user_id");
+      const savedUserId = sessionStorage.getItem("tino_user_id");
       const savedName = localStorage.getItem("tino_user_name");
       const savedGrade = localStorage.getItem("tino_user_grade");
       if (savedName && savedGrade) {
+        const grade = Number(savedGrade);
+        const memory = loadCompanionMemory(savedName, grade);
+        const sessionUserId = savedUserId || generateUserId();
+        const greeting = buildCompanionGreeting(savedName, memory);
+        sessionStorage.setItem("tino_user_id", sessionUserId);
+        setUserId(sessionUserId);
         setUserName(savedName);
-        setUserGrade(Number(savedGrade));
-      } else {
-        setMode("onboarding");
+        setUserGrade(grade);
+        companionMemoryRef.current = memory;
+        setDisplayText(greeting);
+        setCompanionMsgs([
+          { id: "g", sender: "tino", content: greeting, timestamp: Date.now() },
+        ]);
+        setMode("companion");
       }
     } catch { /* SSR or unavailable */ }
   }, []);
@@ -182,12 +325,6 @@ export default function Home() {
     const t = setTimeout(() => setDiamondDelta(null), 1200);
     return () => clearTimeout(t);
   }, [diamondDelta]);
-
-  useEffect(() => {
-    if (friendDiamondDelta === null) return;
-    const t = setTimeout(() => setFriendDiamondDelta(null), 1200);
-    return () => clearTimeout(t);
-  }, [friendDiamondDelta]);
 
   const awardDiamonds = useCallback((text: string) => {
     const pts = scoreEnglish(text);
@@ -220,7 +357,7 @@ export default function Home() {
     speakerTimer.current = setTimeout(() => setActiveSpeaker(null), 4000);
   }, []);
 
-  /* TTS playback via AudioContext (mobile-compatible) */
+  /* TTS playback via AudioContext */
   const [isSpeaking, setIsSpeaking] = useState(false);
   const ttsChain = useRef<Promise<void>>(Promise.resolve());
   const ttsPending = useRef(0);
@@ -263,30 +400,26 @@ export default function Home() {
     if (gainNodeRef.current) gainNodeRef.current.gain.value = volume / 10;
   }, [volume]);
 
-  const playTTS = useCallback(
-    (text: string, speaker?: string, onPlayStart?: () => void) => {
+  const playAudioBase64 = useCallback(
+    (
+      audioBase64: string,
+      speaker?: string,
+      onPlayStart?: () => void
+    ) => {
       const ctx = audioCtxRef.current;
       const gain = gainNodeRef.current;
-      if (!ctx || !gain) return;
+      if (!ctx || !gain || !audioBase64) return;
 
       ttsPending.current++;
       setIsSpeaking(true);
 
       const audioReady = (async (): Promise<AudioBuffer | null> => {
         try {
-          const res = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
-          });
-          const data = await res.json();
-          if (!data.audioBase64 || data.error) return null;
-
-          const binary = atob(data.audioBase64);
+          const binary = atob(audioBase64);
           const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++)
+          for (let i = 0; i < binary.length; i++) {
             bytes[i] = binary.charCodeAt(i);
-
+          }
           return await ctx.decodeAudioData(bytes.buffer.slice(0));
         } catch {
           return null;
@@ -318,7 +451,7 @@ export default function Home() {
             source.start(0);
           });
         } catch {
-          /* TTS unavailable */
+          /* audio playback unavailable */
         } finally {
           ttsPending.current--;
           if (ttsPending.current <= 0) {
@@ -326,6 +459,70 @@ export default function Home() {
             setIsSpeaking(false);
           }
         }
+      });
+    },
+    [highlightSpeaker]
+  );
+
+  const playTTS = useCallback(
+    (text: string, speaker?: string, onPlayStart?: () => void) => {
+      const audioReady = (async (): Promise<AudioBuffer | null> => {
+        try {
+          const res = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          const data = await res.json();
+          if (!data.audioBase64 || data.error) return null;
+          return await audioCtxRef.current!.decodeAudioData(
+            Uint8Array.from(atob(data.audioBase64), (char) => char.charCodeAt(0)).buffer.slice(0)
+          );
+        } catch {
+          return null;
+        }
+      })();
+      audioReady.then((audioBuffer) => {
+        if (!audioBuffer) {
+          onPlayStart?.();
+          return;
+        }
+
+        const ctx = audioCtxRef.current;
+        const gain = gainNodeRef.current;
+        if (!ctx || !gain) return;
+
+        ttsPending.current++;
+        setIsSpeaking(true);
+
+        ttsChain.current = ttsChain.current.then(async () => {
+          try {
+            if (ctx.state === "suspended") await ctx.resume();
+            if (speaker) highlightSpeaker(speaker);
+            onPlayStart?.();
+            gain.gain.value = volumeRef.current / 10;
+
+            await new Promise<void>((resolve) => {
+              const source = ctx.createBufferSource();
+              source.buffer = audioBuffer;
+              source.connect(gain);
+              currentSrcRef.current = source;
+              source.onended = () => {
+                currentSrcRef.current = null;
+                resolve();
+              };
+              source.start(0);
+            });
+          } catch {
+            /* TTS unavailable */
+          } finally {
+            ttsPending.current--;
+            if (ttsPending.current <= 0) {
+              ttsPending.current = 0;
+              setIsSpeaking(false);
+            }
+          }
+        });
       });
     },
     [highlightSpeaker]
@@ -340,10 +537,6 @@ export default function Home() {
 
   /* scroll (room messages) */
   const bottomRef = useRef<HTMLDivElement>(null);
-  const modeRef = useRef(mode);
-  useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [roomMsgs, isLoading]);
@@ -433,6 +626,13 @@ export default function Home() {
       highlightSpeaker("tino");
 
       try {
+        const nextMemory = updateCompanionMemory(
+          companionMemoryRef.current,
+          text
+        );
+        companionMemoryRef.current = nextMemory;
+        persistCompanionMemory(userName, userGrade, nextMemory);
+
         const history = [
           ...companionMsgs.slice(-16),
           { id: "", sender: "user" as const, content: text, timestamp: 0 },
@@ -448,6 +648,12 @@ export default function Home() {
             turnCount: turnCount + 1,
             userName,
             userGrade,
+            userMemory: {
+              memories: nextMemory.memories.slice(0, 4),
+              weaknessNotes: deriveWeaknessNotes(nextMemory),
+              totalMessages: nextMemory.totalMessages,
+              totalEnglishTurns: nextMemory.totalEnglishTurns,
+            },
           }),
         });
 
@@ -506,6 +712,8 @@ export default function Home() {
       isLoading,
       companionMsgs,
       turnCount,
+      userName,
+      userGrade,
       addMsg,
       awardDiamonds,
       speak,
@@ -515,80 +723,158 @@ export default function Home() {
     ]
   );
 
-  /* ─── room chat ─── */
+  /* ─── room: send message to server ─── */
 
-  const callRoom = useCallback(
-    async (action: string, extra: Record<string, unknown> = {}) => {
-      if (!friend) return null;
+  const sendRoom = useCallback(
+    async ({
+      text,
+      audioBase64,
+      mimeType,
+    }: {
+      text: string;
+      audioBase64?: string;
+      mimeType?: string;
+    }) => {
+      if (isLoading || endedRef.current || !roomId) return;
+      setIsLoading(true);
+
       try {
-        const recent = roomMsgs
-          .slice(-10)
-          .map((m) => `${m.sender}: ${m.content}`)
-          .join("\n");
-        const res = await fetch("/api/room", {
+        const res = await fetch("/api/room-chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            action,
-            phase: getPhase(ROOM_DURATION - timeLeft),
-            turnIndex: roomTurnRef.current,
-            friendName: friend.name,
-            friendEnglishName: friend.englishName,
-            friendGrade: friend.grade,
-            friendLikes: friend.likes,
-            recentContext: recent,
-            englishCount,
-            ...extra,
+            action: "send",
+            roomId,
+            userId,
+            userName,
+            content: text,
+            audioBase64,
+            mimeType,
           }),
         });
-        return await res.json();
+        if (!res.ok) {
+          throw new Error(`room send failed: ${res.status}`);
+        }
+        const data = await res.json();
+        if (!data.messageId) {
+          throw new Error("missing messageId");
+        }
+        seenMsgIds.current.add(data.messageId);
+        addMsg("user", text);
+        awardDiamonds(text);
       } catch {
-        return null;
+        addMsg("system", "消息发送失败，请重试");
+      } finally {
+        setIsLoading(false);
       }
     },
-    [friend, roomMsgs, timeLeft, englishCount]
+    [isLoading, roomId, userId, userName, addMsg, awardDiamonds]
   );
 
-  const sendRoom = useCallback(
-    async (text: string) => {
-      if (isLoading || endedRef.current) return;
-      addMsg("user", text);
-      awardDiamonds(text);
-      roomTurnRef.current += 1;
-      setIsLoading(true);
+  /* ─── room: Chinese detection wrapper ─── */
 
-      await new Promise((r) => setTimeout(r, 600 + Math.random() * 1000));
-      const fd = await callRoom("friend_reply", { userMessage: text });
-      if (fd?.reply) {
-        const fpts = scoreEnglish(fd.reply);
-        if (fpts > 0) {
-          setFriendDiamonds((d) => d + fpts);
-          setFriendDiamondDelta(fpts);
+  const handleRoomMessage = useCallback(
+    async (
+      text: string,
+      audioPayload?: { audioBase64?: string; mimeType?: string }
+    ) => {
+      if (containsChinese(text)) {
+        setTranslationPopup({ chinese: text, english: "", loading: true });
+        try {
+          const res = await fetch("/api/translate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          const data = await res.json();
+          setTranslationPopup({
+            chinese: text,
+            english: data.english || "I want to say something!",
+            loading: false,
+          });
+        } catch {
+          setTranslationPopup({
+            chinese: text,
+            english: "I want to say something!",
+            loading: false,
+          });
         }
-        speak("friend", fd.reply);
+        return;
       }
-      roomTurnRef.current += 1;
-
-      if (roomTurnRef.current % 3 === 0) {
-        await ttsChain.current;
-        const who = moderatorRef.current;
-        moderatorRef.current = who === "tino" ? "ai2" : "tino";
-        const hd = await callRoom("host_comment");
-        if (hd?.reply) speak(who, hd.reply);
-      }
-      setIsLoading(false);
+      sendRoom({
+        text,
+        audioBase64: audioPayload?.audioBase64,
+        mimeType: audioPayload?.mimeType,
+      });
     },
-    [isLoading, addMsg, awardDiamonds, speak, callRoom]
+    [sendRoom]
   );
 
   const sendMessage = useCallback(
     (text: string) => {
       if (!text.trim()) return;
-      if (modeRef.current === "room") sendRoom(text.trim());
+      if (modeRef.current === "room") handleRoomMessage(text.trim());
       else sendCompanion(text.trim());
     },
-    [sendCompanion, sendRoom]
+    [sendCompanion, handleRoomMessage]
   );
+
+  /* ─── room: polling for partner messages ─── */
+
+  useEffect(() => {
+    if (mode !== "room" || !roomId) return;
+
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/room-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "poll",
+            roomId,
+            since: lastPollTimeRef.current,
+          }),
+        });
+        const data = await res.json();
+        const msgs = data.messages || [];
+
+        for (const m of msgs) {
+          if (seenMsgIds.current.has(m.id)) continue;
+          seenMsgIds.current.add(m.id);
+
+          if (m.senderId === userId) continue;
+
+          const sender: MessageSender =
+            m.senderId === "tino" ? "tino" : "friend";
+          addMsg(sender, m.content);
+          if (sender === "friend" && m.audioBase64) {
+            playAudioBase64(m.audioBase64, sender, () => {
+              setRoomDisplay({ sender, content: m.content });
+            });
+          } else {
+            playTTS(m.content, sender, () => {
+              setRoomDisplay({ sender, content: m.content });
+            });
+          }
+        }
+
+        if (msgs.length > 0) {
+          lastPollTimeRef.current = Math.max(
+            ...msgs.map((m: { timestamp: number }) => m.timestamp)
+          );
+        }
+      } catch {
+        /* poll failed */
+      }
+    };
+
+    pollTimerRef.current = setInterval(poll, 1500);
+    poll();
+
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
+  }, [mode, roomId, userId, addMsg, playAudioBase64, playTTS]);
 
   /* ─── voice recording ─── */
 
@@ -618,13 +904,13 @@ export default function Home() {
         const blob = new Blob(chunksRef.current, { type: actualMime });
         if (blob.size < 100) return;
         setIsTranscribing(true);
+        const reader = new FileReader();
+        const b64 = await new Promise<string>((resolve) => {
+          reader.onloadend = () =>
+            resolve((reader.result as string).split(",")[1]);
+          reader.readAsDataURL(blob);
+        });
         try {
-          const reader = new FileReader();
-          const b64 = await new Promise<string>((resolve) => {
-            reader.onloadend = () =>
-              resolve((reader.result as string).split(",")[1]);
-            reader.readAsDataURL(blob);
-          });
           const res = await fetch("/api/asr", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -632,43 +918,23 @@ export default function Home() {
           });
           const data = await res.json();
           const text = (data.text || "").trim();
-          if (!text) return;
-
-          if (modeRef.current === "onboarding") {
-            const step = onboardStepRef.current;
-            setOnboardHeard(text);
-            if (step === 0) {
-              const name = text.slice(0, 10).replace(/[^\u4e00-\u9fa5a-zA-Z]/g, "") || text.slice(0, 10);
-              if (name) {
-                setUserName(name);
-                setOnboardHeard("");
-                setOnboardStep(1);
-              }
-            } else {
-              const grade = parseGradeFromSpeech(text);
-              if (grade >= 1 && grade <= 6) {
-                const name = userNameRef.current;
-                setUserGrade(grade);
-                try {
-                  localStorage.setItem("tino_user_name", name);
-                  localStorage.setItem("tino_user_grade", String(grade));
-                } catch {}
-                const greeting = `哇，${grade}年级啦！So cool!\n${name}，我们一起聊天吧～`;
-                setDisplayText(greeting);
-                setCompanionMsgs([{
-                  id: "g",
-                  sender: "tino",
-                  content: greeting,
-                  timestamp: Date.now(),
-                }]);
-                setMode("companion");
-              }
-            }
+          if (modeRef.current === "room") {
+            await handleRoomMessage(text || "Voice message", {
+              audioBase64: b64,
+              mimeType: actualMime,
+            });
             return;
           }
+          if (!text) return;
           sendMessage(text);
         } catch {
-          /* ASR unavailable */
+          if (modeRef.current === "room") {
+            await sendRoom({
+              text: "Voice message",
+              audioBase64: b64,
+              mimeType: actualMime,
+            });
+          }
         } finally {
           setIsTranscribing(false);
         }
@@ -679,7 +945,13 @@ export default function Home() {
     } catch {
       /* mic denied */
     }
-  }, [isPowered, isRecording, sendMessage, highlightSpeaker, unlockAudio]);
+  }, [isPowered, isRecording, sendMessage, sendRoom, handleRoomMessage, highlightSpeaker, unlockAudio]);
+
+  useEffect(() => {
+    if (!translationPopup || translationPopup.loading) return;
+    const timer = setTimeout(() => setTranslationPopup(null), 1800);
+    return () => clearTimeout(timer);
+  }, [translationPopup]);
 
   const stopRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
@@ -711,81 +983,152 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [showVolume, volume]);
 
-  /* pre-fetched intro lines */
-  const prefetchedIntro = useRef<{
-    tino?: string; ai2?: string; friendIntro?: string; warmup?: string;
-  }>({});
+  /* ─── login ─── */
 
-  const prefetchIntro = useCallback(async (f: VirtualFriend) => {
-    const base = {
-      phase: "icebreaking",
-      turnIndex: 0,
-      friendName: f.name,
-      friendEnglishName: f.englishName,
-      friendGrade: f.grade,
-      friendLikes: f.likes,
-      recentContext: "",
-      englishCount: 0,
-    };
-    const call = async (action: string, extra: Record<string, unknown> = {}) => {
-      try {
-        const res = await fetch("/api/room", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, ...base, ...extra }),
-        });
-        const data = await res.json();
-        return data?.reply || null;
-      } catch { return null; }
-    };
-    const [tino, ai2, friendIntro, warmup] = await Promise.all([
-      call("tino_intro", { userName: userName || "小朋友" }),
-      call("ai2_intro"),
-      call("friend_self_intro"),
-      call("warmup", { userName: userName || "小朋友" }),
-    ]);
-    prefetchedIntro.current = { tino, ai2, friendIntro, warmup };
-  }, []);
-
-  const leaveRoom = useCallback(() => {
-    endedRef.current = true;
-    setDiamonds((d) => d + sessionDiamonds);
-    setSessionDiamonds(0);
+  const handleLogin = useCallback(() => {
+    const name = loginName.trim();
+    if (!name || loginGrade < 1) return;
+    const uid = generateUserId();
+    const memory = loadCompanionMemory(name, loginGrade);
+    const greeting = buildCompanionGreeting(name, memory);
+    companionMemoryRef.current = memory;
+    unlockAudio();
+    setUserId(uid);
+    setUserName(name);
+    setUserGrade(loginGrade);
+    try {
+      sessionStorage.setItem("tino_user_id", uid);
+      localStorage.removeItem("tino_user_id");
+      localStorage.setItem("tino_user_name", name);
+      localStorage.setItem("tino_user_grade", String(loginGrade));
+    } catch {}
+    setDisplayText(greeting);
+    setCompanionMsgs([{
+      id: "g",
+      sender: "tino",
+      content: greeting,
+      timestamp: Date.now(),
+    }]);
     setMode("companion");
-    setFriend(null);
-    setActiveSpeaker(null);
-    setShowExitConfirm(false);
-    setRoomDisplay(null);
-  }, [sessionDiamonds]);
+    playTTS(greeting, "tino", () => setDisplayText(greeting));
+  }, [loginName, loginGrade, playTTS, unlockAudio]);
+
+  const handleLogout = useCallback(() => {
+    try {
+      sessionStorage.removeItem("tino_user_id");
+      localStorage.removeItem("tino_user_id");
+      localStorage.removeItem("tino_user_name");
+      localStorage.removeItem("tino_user_grade");
+    } catch {}
+    companionMemoryRef.current = createEmptyCompanionMemory();
+    setUserId("");
+    setUserName("");
+    setUserGrade(0);
+    setLoginName("");
+    setLoginGrade(0);
+    setMode("login");
+  }, []);
 
   /* ─── matching ─── */
 
-  const startMatch = useCallback(() => {
-    unlockAudio();
-    setMode("matching");
-    const f = FRIENDS[Math.floor(Math.random() * FRIENDS.length)];
-    prefetchedIntro.current = {};
-    prefetchIntro(f);
-    setTimeout(() => {
-      setFriend(f);
+  const leaveRoom = useCallback(() => {
+    endedRef.current = true;
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    setDiamonds((d) => d + sessionDiamonds);
+    setSessionDiamonds(0);
+    setMode("companion");
+    setPartner(null);
+    setRoomId("");
+    setActiveSpeaker(null);
+    setShowExitConfirm(false);
+    setRoomDisplay(null);
+    seenMsgIds.current.clear();
+    lastPollTimeRef.current = 0;
+
+    fetch("/api/match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "leave", userId }),
+    }).catch(() => {});
+  }, [sessionDiamonds, userId]);
+
+  const enterRoom = useCallback(
+    (rid: string, p: RoomPartner) => {
+      setRoomId(rid);
+      setPartner(p);
       setRoomMsgs([]);
       setTimeLeft(ROOM_DURATION);
       setEnglishCount(0);
-      roomTurnRef.current = 0;
-      gameRef.current = false;
-      summaryRef.current = false;
-      introRef.current = false;
       endedRef.current = false;
-      moderatorRef.current = "tino";
       setActiveSpeaker(null);
       setRoomDisplay(null);
       setSessionDiamonds(0);
-      setFriendDiamonds(0);
+      seenMsgIds.current.clear();
+      lastPollTimeRef.current = 0;
       setMode("room");
-    }, 3000);
-  }, [unlockAudio, prefetchIntro]);
+    },
+    []
+  );
 
-  /* ─── shake-to-match (mobile accelerometer) ─── */
+  const startMatch = useCallback(async () => {
+    unlockAudio();
+    setMode("matching");
+
+    try {
+      const res = await fetch("/api/match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "join",
+          userId,
+          name: userName,
+          grade: userGrade,
+        }),
+      });
+      const data = await res.json();
+
+      if (data.matched && data.roomId && data.partner) {
+        setTimeout(() => enterRoom(data.roomId, data.partner), 1500);
+        return;
+      }
+
+      matchPollRef.current = setInterval(async () => {
+        try {
+          const r = await fetch("/api/match", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "status", userId }),
+          });
+          const d = await r.json();
+          if (d.matched && d.roomId && d.partner) {
+            if (matchPollRef.current) clearInterval(matchPollRef.current);
+            enterRoom(d.roomId, d.partner);
+          }
+        } catch { /* retry */ }
+      }, 1500);
+    } catch {
+      setMode("companion");
+    }
+  }, [unlockAudio, userId, userName, userGrade, enterRoom]);
+
+  const cancelMatch = useCallback(() => {
+    if (matchPollRef.current) clearInterval(matchPollRef.current);
+    fetch("/api/match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "leave", userId }),
+    }).catch(() => {});
+    setMode("companion");
+  }, [userId]);
+
+  /* cleanup match polling on unmount */
+  useEffect(() => {
+    return () => {
+      if (matchPollRef.current) clearInterval(matchPollRef.current);
+    };
+  }, []);
+
+  /* ─── shake-to-match ─── */
 
   const shakeRef = useRef({ count: 0, lastTime: 0, lastX: 0, lastY: 0, lastZ: 0 });
   const shakeCooldownRef = useRef(false);
@@ -849,78 +1192,18 @@ export default function Home() {
   }, [mode]);
 
   useEffect(() => {
-    if (mode !== "room" || introRef.current || !friend) return;
-    introRef.current = true;
-    addMsg("system", `${friend.name} 加入了聊天`);
-
-    const pre = prefetchedIntro.current;
-
-    speak(
-      "tino",
-      pre.tino ||
-        `嘿嘿，我来给大家介绍一下！This is my best friend ${userName || "小朋友"}！我们经常一起聊天哦～`
-    );
-
-    (async () => {
-      await ttsChain.current;
-
-      speak(
-        "ai2",
-        pre.ai2 ||
-          `我也带了一个好朋友！This is ${friend.englishName}! ${friend.name}喜欢${friend.likes.join("和")}哦～`
-      );
-      await ttsChain.current;
-
-      speak(
-        "friend",
-        pre.friendIntro ||
-          `大家好！I'm ${friend.englishName}! Nice to meet you! 我喜欢${friend.likes[0]}～`
-      );
-      await ttsChain.current;
-
-      speak(
-        "tino",
-        pre.warmup ||
-          `太棒了！Now let's chat! ${userName || "小朋友"}，你喜欢什么呀？Tell us!`
-      );
-    })();
-  }, [mode, friend, addMsg, speak]);
-
-  const elapsed = ROOM_DURATION - timeLeft;
-  const phase = getPhase(elapsed);
-
-  useEffect(() => {
-    if (mode !== "room") return;
-    if (phase === "game" && !gameRef.current) {
-      gameRef.current = true;
-      addMsg("system", "🎮 小游戏时间！");
-      (async () => {
-        const d = await callRoom("game");
-        speak("tino", d?.reply || "Game time! 谁能用英文说三种水果？🍎🍌🍊");
-      })();
-    }
-    if (phase === "summary" && !summaryRef.current) {
-      summaryRef.current = true;
-      (async () => {
-        const d = await callRoom("summary");
-        speak(
-          "tino",
-          d?.reply || `你们说了 ${englishCount} 句英文！Great job! 👏`
-        );
-      })();
-    }
-  }, [mode, phase, addMsg, speak, callRoom, englishCount]);
-
-  useEffect(() => {
     if (mode !== "room" || timeLeft > 0 || endedRef.current) return;
     endedRef.current = true;
     setDiamonds((d) => d + sessionDiamonds);
     setSessionDiamonds(0);
     addMsg("system", "聊天时间到啦～下次再见！");
     setTimeout(() => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       setMode("companion");
-      setFriend(null);
+      setPartner(null);
+      setRoomId("");
       setActiveSpeaker(null);
+      seenMsgIds.current.clear();
     }, 3500);
   }, [mode, timeLeft, addMsg, sessionDiamonds]);
 
@@ -964,11 +1247,9 @@ export default function Home() {
   const centerLabel =
     centerSpeaker === "tino"
       ? "Tino"
-      : centerSpeaker === "ai2"
-        ? AI2_NAME
-        : centerSpeaker === "user"
-          ? (userName || "我")
-          : friend?.name || "";
+      : centerSpeaker === "user"
+        ? (userName || "我")
+        : partner?.name || "小伙伴";
 
   useEffect(() => {
     const el = lyricsRef.current;
@@ -1003,44 +1284,54 @@ export default function Home() {
         <div className="h-full bg-[#111] rounded-[8px] flex items-center justify-center">
           <TinoAvatar size={48} expression="happy" className="opacity-10" />
         </div>
-      ) : mode === "onboarding" ? (
-        <div className="flex flex-col h-full items-center justify-center px-5 gap-3">
-          <TinoAvatar
-            size={64}
-            expression={isRecording ? "excited" : isTranscribing ? "thinking" : "waving"}
-            className={isRecording ? "animate-pulse-soft" : "animate-float"}
-          />
-          {onboardStep === 0 ? (
-            <>
-              <p className="text-sm text-tino-brown text-center font-bold">
-                嗨！我是 Tino～<br />一只来自语言星球的小狐狸 🦊<br />你叫什么名字呀？
-              </p>
-              <p className="text-xs text-tino-brown-light text-center">
-                按住右侧按钮告诉我吧～
-              </p>
-              {onboardHeard && (
-                <p className="text-xs text-tino-orange font-bold">
-                  你说的是：{onboardHeard}
-                </p>
-              )}
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-tino-brown text-center font-bold">
-                {userName}，好好听的名字！<br />Nice to meet you! 嘻嘻～<br />那你现在几年级啦？
-              </p>
-              <p className="text-xs text-tino-brown-light text-center">
-                按住右侧按钮说话（一年级、二年级…都可以哦）
-              </p>
-              {onboardHeard && (
-                <p className="text-xs text-tino-orange font-bold">
-                  你说的是：{onboardHeard}
-                </p>
-              )}
-            </>
-          )}
+      ) : mode === "login" ? (
+        /* ── login screen ── */
+        <div className="flex flex-col h-full items-center justify-center px-5 gap-2">
+          <TinoAvatar size={48} expression="waving" className="animate-float" />
+          <p className="text-sm text-tino-brown text-center font-bold leading-snug">
+            嗨！我是 Tino！<br />你的英语聊天小助手
+          </p>
+
+          <div className="w-full mt-1">
+            <input
+              type="text"
+              value={loginName}
+              onChange={(e) => setLoginName(e.target.value)}
+              placeholder="输入你的名字"
+              maxLength={10}
+              className="w-full px-3 py-2 rounded-xl bg-white border border-tino-orange/20 text-sm text-center placeholder:text-tino-brown-light/50 focus:outline-none focus:border-tino-orange/50 focus:ring-2 focus:ring-tino-orange/10"
+            />
+          </div>
+
+          <div className="w-full">
+            <p className="text-[10px] text-tino-brown-light text-center mb-1">你几年级？</p>
+            <div className="flex justify-center gap-1.5">
+              {[1, 2, 3, 4, 5, 6].map((g) => (
+                <button
+                  key={g}
+                  onClick={() => setLoginGrade(g)}
+                  className={`w-7 h-7 rounded-full text-xs font-bold transition-all ${
+                    loginGrade === g
+                      ? "bg-tino-orange text-white scale-110"
+                      : "bg-tino-orange/10 text-tino-orange active:bg-tino-orange/20"
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button
+            onClick={handleLogin}
+            disabled={!loginName.trim() || loginGrade < 1}
+            className="mt-1 px-6 py-2 rounded-full bg-tino-orange text-white text-sm font-bold shadow-md active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            开始聊天！
+          </button>
         </div>
       ) : mode === "matching" ? (
+        /* ── matching animation ── */
         <div className="h-full bg-gradient-to-b from-tino-orange/80 to-tino-blue/60 flex flex-col items-center justify-center gap-4 text-white text-center px-4">
           <div className="match-spin">
             <TinoAvatar size={64} expression="excited" />
@@ -1058,10 +1349,16 @@ export default function Home() {
               />
             ))}
           </div>
+          <button
+            onClick={cancelMatch}
+            className="mt-2 px-4 py-1.5 rounded-full bg-white/20 text-white text-xs font-bold active:bg-white/30 transition-colors"
+          >
+            取消匹配
+          </button>
         </div>
       ) : mode === "companion" ? (
         /* ── companion: avatar + speech ── */
-        <div className="flex flex-col h-full relative">
+        <div className="flex flex-col h-full min-h-0 relative">
           {showVolume && (
             <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
               <div className="bg-black/60 text-white rounded-2xl px-5 py-3 text-lg font-bold">
@@ -1082,12 +1379,20 @@ export default function Home() {
                 </span>
               )}
             </button>
-            <button
-              onClick={startMatch}
-              className="px-2.5 py-1 rounded-full bg-tino-orange/15 text-tino-orange text-xs font-bold active:bg-tino-orange/25 transition-colors"
-            >
-              🌪️ 摇一摇
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleLogout}
+                className="px-2 py-1 rounded-full bg-gray-100 text-gray-500 text-[9px] font-bold active:bg-gray-200 transition-colors"
+              >
+                退出
+              </button>
+              <button
+                onClick={startMatch}
+                className="px-2.5 py-1 rounded-full bg-tino-orange/15 text-tino-orange text-xs font-bold active:bg-tino-orange/25 transition-colors"
+              >
+                🌪️ 摇一摇
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 flex flex-col items-center justify-center px-5 gap-3 min-h-0">
@@ -1108,6 +1413,9 @@ export default function Home() {
           </div>
 
           <div className="flex-shrink-0 py-2 text-center">
+            <p className="text-[9px] text-tino-brown-light/60 mb-0.5">
+              {userName} · {userGrade}年级
+            </p>
             <p className="text-xs font-bold text-tino-brown-light">
               {statusIcon} {statusText}
             </p>
@@ -1115,7 +1423,7 @@ export default function Home() {
         </div>
       ) : mode === "shop" ? (
         /* ── shop: avatar frame store ── */
-        <div className="flex flex-col h-full relative">
+        <div className="flex flex-col h-full min-h-0 relative">
           <div className="flex items-center justify-between px-3 py-2 flex-shrink-0 border-b border-tino-orange/10">
             <button
               onClick={() => setMode("companion")}
@@ -1174,12 +1482,32 @@ export default function Home() {
           </div>
         </div>
       ) : (
-        /* ── room: speaker stage ── */
-        <div className="flex flex-col h-full relative">
+        /* ── room: real-time chat ── */
+        <div className="flex flex-col h-full min-h-0 relative">
           {showVolume && (
             <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
               <div className="bg-black/60 text-white rounded-2xl px-5 py-3 text-lg font-bold">
                 🔊 {volume}
+              </div>
+            </div>
+          )}
+
+          {/* translation popup */}
+          {translationPopup && (
+            <div className="absolute inset-0 z-50 bg-black/50 flex items-center justify-center px-3">
+              <div className="bg-white rounded-2xl p-4 max-w-[210px] w-full text-center shadow-xl">
+                <p className="text-[10px] text-gray-400 mb-1">你想说的是：</p>
+                <p className="text-sm font-bold text-tino-brown mb-2 leading-snug">
+                  {translationPopup.chinese}
+                </p>
+                <p className="text-[10px] text-gray-400 mb-1">用英文可以这样说：</p>
+                {translationPopup.loading ? (
+                  <p className="text-sm text-tino-orange animate-pulse my-2">翻译中...</p>
+                ) : (
+                  <p className="text-sm font-bold text-tino-orange leading-snug">
+                    {translationPopup.english}
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -1192,52 +1520,80 @@ export default function Home() {
           )}
 
           {/* participant strip */}
-          <div className="flex items-start justify-center gap-3 px-2 pt-4 pb-1 flex-shrink-0">
+          <div className="flex items-start justify-center gap-6 px-2 pt-3 pb-0.5 flex-shrink-0">
             {([
-              { id: "tino" as const, node: <TinoAvatar size={28} expression="happy" />, isAI: true },
-              { id: "ai2" as const, node: <div className="w-7 h-7 rounded-full bg-violet-400 text-white text-[13px] flex items-center justify-center">{AI2_EMOJI}</div>, isAI: true },
-              { id: "user" as const, node: <div className="w-7 h-7 rounded-full bg-tino-blue text-white text-[9px] font-bold flex items-center justify-center" style={activeFrame !== "none" ? userFrameStyle : undefined}>我</div>, isAI: false },
-              { id: "friend" as const, node: <div className="w-7 h-7 rounded-full bg-tino-green text-white text-[9px] font-bold flex items-center justify-center">{friend?.name?.[1]}</div>, isAI: false },
-            ]).map(({ id, node, isAI }) => (
+              {
+                id: "tino" as const,
+                label: "Tino",
+                node: <TinoAvatar size={28} expression="happy" />,
+                isAI: true,
+              },
+              {
+                id: "user" as const,
+                label: userName || "我",
+                node: (
+                  <div
+                    className="w-7 h-7 rounded-full bg-tino-blue text-white text-[9px] font-bold flex items-center justify-center"
+                    style={activeFrame !== "none" ? userFrameStyle : undefined}
+                  >
+                    我
+                  </div>
+                ),
+                isAI: false,
+              },
+              {
+                id: "friend" as const,
+                label: partner?.name || "小伙伴",
+                node: (
+                  <div className="w-7 h-7 rounded-full bg-tino-green text-white text-[9px] font-bold flex items-center justify-center">
+                    {partner?.name?.[0] || "?"}
+                  </div>
+                ),
+                isAI: false,
+              },
+            ]).map(({ id, label, node, isAI }) => (
               <div
                 key={id}
                 className={`flex flex-col items-center transition-all duration-300 ${
                   centerSpeaker === id ? "opacity-100 scale-110" : "opacity-30"
                 }`}
-                style={{ width: 36, height: 44 }}
-                onClick={id === "user" ? () => { if (showExitConfirm) leaveRoom(); else setShowExitConfirm(true); } : undefined}
+                style={{ width: 40, height: 48 }}
+                onClick={
+                  id === "user"
+                    ? () => {
+                        if (showExitConfirm) leaveRoom();
+                        else setShowExitConfirm(true);
+                      }
+                    : undefined
+                }
               >
                 <div className="relative">
                   {node}
                   {isAI && (
-                    <span className="absolute -top-1.5 -right-2 bg-violet-500 text-white text-[5px] font-bold px-[3px] py-[0.5px] rounded-sm leading-tight">AI</span>
+                    <span className="absolute -top-1.5 -right-2 bg-violet-500 text-white text-[5px] font-bold px-[3px] py-[0.5px] rounded-sm leading-tight">
+                      AI
+                    </span>
                   )}
                 </div>
-                <span className="relative mt-0.5 text-[8px] font-bold text-violet-500 leading-none whitespace-nowrap">
-                  {(id === "user" || id === "friend") ? (
-                    <>
-                      💎{id === "user" ? sessionDiamonds : friendDiamonds}
-                      {id === "user" && diamondDelta !== null && (
-                        <span className="absolute -top-2.5 left-full ml-0.5 text-[9px] text-green-500 font-bold diamond-float whitespace-nowrap">
-                          +{diamondDelta}
-                        </span>
-                      )}
-                      {id === "friend" && friendDiamondDelta !== null && (
-                        <span className="absolute -top-2.5 left-full ml-0.5 text-[9px] text-green-500 font-bold diamond-float whitespace-nowrap">
-                          +{friendDiamondDelta}
-                        </span>
-                      )}
-                    </>
-                  ) : (
-                    <span className="invisible">💎0</span>
-                  )}
+                <span className="mt-0.5 text-[7px] font-bold text-tino-brown truncate max-w-[40px]">
+                  {label}
                 </span>
+                {(id === "user" || id === "friend") && (
+                  <span className="relative text-[8px] font-bold text-violet-500 leading-none">
+                    💎{id === "user" ? sessionDiamonds : 0}
+                    {id === "user" && diamondDelta !== null && (
+                      <span className="absolute -top-2.5 left-full ml-0.5 text-[9px] text-green-500 font-bold diamond-float whitespace-nowrap">
+                        +{diamondDelta}
+                      </span>
+                    )}
+                  </span>
+                )}
               </div>
             ))}
           </div>
 
-          {/* center: speaker + lyrics + status */}
-          <div className="flex-1 flex flex-col items-center justify-center px-4">
+          {/* center: speaker + lyrics */}
+          <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-4">
             <div
               className="rounded-full p-0.5 transition-all duration-500"
               key={centerSpeaker}
@@ -1254,11 +1610,6 @@ export default function Home() {
                   className={activeSpeaker === "tino" ? "animate-pulse-soft" : "animate-float"}
                 />
               )}
-              {centerSpeaker === "ai2" && (
-                <div className="w-12 h-12 rounded-full bg-violet-400 text-white text-2xl flex items-center justify-center">
-                  {AI2_EMOJI}
-                </div>
-              )}
               {centerSpeaker === "user" && (
                 <div
                   className="w-12 h-12 rounded-full bg-tino-blue text-white text-base font-bold flex items-center justify-center"
@@ -1269,7 +1620,7 @@ export default function Home() {
               )}
               {centerSpeaker === "friend" && (
                 <div className="w-12 h-12 rounded-full bg-tino-green text-white text-base font-bold flex items-center justify-center">
-                  {friend?.name?.[1]}
+                  {partner?.name?.[0] || "?"}
                 </div>
               )}
             </div>
@@ -1279,8 +1630,8 @@ export default function Home() {
             {/* lyrics text area */}
             <div
               ref={lyricsBoxRef}
-              className="mt-2 w-full overflow-hidden"
-              style={{ height: "4.5em", lineHeight: "1.5" }}
+              className="mt-1.5 w-full overflow-hidden"
+              style={{ height: "3.9em", lineHeight: "1.45" }}
             >
               <div
                 ref={lyricsRef}
@@ -1293,8 +1644,8 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="flex-shrink-0 py-2 text-center">
-            <p className="text-xs font-bold text-tino-brown-light">
+          <div className="flex-shrink-0 px-2 py-1 text-center">
+            <p className="text-[11px] leading-tight font-bold text-tino-brown-light">
               {statusIcon} {statusText}
             </p>
           </div>
@@ -1303,4 +1654,3 @@ export default function Home() {
     </DeviceFrame>
   );
 }
-

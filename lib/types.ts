@@ -1,4 +1,4 @@
-export type MessageSender = "user" | "tino" | "ai2" | "friend" | "system";
+export type MessageSender = "user" | "tino" | "friend" | "system";
 
 export type Message = {
   id: string;
@@ -7,13 +7,12 @@ export type Message = {
   timestamp: number;
 };
 
-export type AppMode = "onboarding" | "companion" | "matching" | "room" | "shop";
+export type AppMode = "login" | "companion" | "matching" | "room" | "shop";
 
-export type RoomPhase = "icebreaking" | "free_chat" | "game" | "summary";
+export type RoomPhase = "chatting" | "ending";
 
-export type VirtualFriend = {
+export type RoomPartner = {
+  userId: string;
   name: string;
-  englishName: string;
   grade: number;
-  likes: string[];
 };
