@@ -181,10 +181,10 @@ function buildCompanionGreeting(
   const remembered = memory.memories[0];
 
   if (remembered) {
-    return `嗨，${name}！我还记得你之前提过“${remembered}”。\n我们接着这个话题聊聊吧，你可以先试着说：I still remember that!`;
+    return `嗨，${name}！我还记得你之前提过“${remembered}”。\n我们今天就接着这个话题聊，好吗？`;
   }
 
-  return `嗨，${name}！今天我们先练一句很自然的英文：How is your day going?\n你可以先跟我说说今天最开心的一件小事。`;
+  return `嗨，${name}！今天先练一句很自然的英文：How is your day going?\n你先用这句话开头就好。`;
 }
 
 /* ───────── avatar frames ───────── */
@@ -588,8 +588,7 @@ export default function Home() {
     (buffer: string): { completed: string[]; remaining: string } => {
       const completed: string[] = [];
       let remaining = buffer;
-      const sentenceEnd = /[。！？!?\n]/;
-      const clauseEnd = /[，,、；;：:]/;
+      const sentenceEnd = /[。！？!?]/;
 
       while (true) {
         const m = remaining.match(sentenceEnd);
@@ -598,15 +597,6 @@ export default function Home() {
           remaining = remaining.slice(m.index + 1);
           if (s) completed.push(s);
           continue;
-        }
-        if (remaining.length > 35) {
-          const cm = remaining.match(clauseEnd);
-          if (cm && cm.index !== undefined && cm.index > 0) {
-            const s = remaining.slice(0, cm.index + 1).trim();
-            remaining = remaining.slice(cm.index + 1);
-            if (s) completed.push(s);
-            continue;
-          }
         }
         break;
       }
@@ -1379,20 +1369,12 @@ export default function Home() {
                 </span>
               )}
             </button>
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={handleLogout}
-                className="px-2 py-1 rounded-full bg-gray-100 text-gray-500 text-[9px] font-bold active:bg-gray-200 transition-colors"
-              >
-                退出
-              </button>
-              <button
-                onClick={startMatch}
-                className="px-2.5 py-1 rounded-full bg-tino-orange/15 text-tino-orange text-xs font-bold active:bg-tino-orange/25 transition-colors"
-              >
-                🌪️ 摇一摇
-              </button>
-            </div>
+            <button
+              onClick={startMatch}
+              className="px-2.5 py-1 rounded-full bg-tino-orange/15 text-tino-orange text-xs font-bold active:bg-tino-orange/25 transition-colors"
+            >
+              🌪️ 摇一摇
+            </button>
           </div>
 
           <div className="flex-1 flex flex-col items-center justify-center px-5 gap-3 min-h-0">
@@ -1413,9 +1395,6 @@ export default function Home() {
           </div>
 
           <div className="flex-shrink-0 py-2 text-center">
-            <p className="text-[9px] text-tino-brown-light/60 mb-0.5">
-              {userName} · {userGrade}年级
-            </p>
             <p className="text-xs font-bold text-tino-brown-light">
               {statusIcon} {statusText}
             </p>
