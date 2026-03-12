@@ -752,6 +752,7 @@ export default function Home() {
         seenMsgIds.current.add(data.messageId);
         addMsg("user", text);
         awardDiamonds(text);
+        setTranslationPopup(null);
       } catch {
         addMsg("system", "消息发送失败，请重试");
       } finally {
@@ -936,12 +937,6 @@ export default function Home() {
       /* mic denied */
     }
   }, [isPowered, isRecording, sendMessage, sendRoom, handleRoomMessage, highlightSpeaker, unlockAudio]);
-
-  useEffect(() => {
-    if (!translationPopup || translationPopup.loading) return;
-    const timer = setTimeout(() => setTranslationPopup(null), 1800);
-    return () => clearTimeout(timer);
-  }, [translationPopup]);
 
   const stopRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
