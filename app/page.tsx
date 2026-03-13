@@ -455,6 +455,54 @@ export default function Home() {
     } catch { /* SSR or unavailable */ }
   }, []);
 
+  const notifyMatchLeave = useCallback(
+    (uid: string, preferBeacon = false) => {
+      if (!uid) return;
+
+      const payload = JSON.stringify({ action: "leave", userId: uid });
+
+      if (
+        preferBeacon &&
+        typeof navigator !== "undefined" &&
+        typeof navigator.sendBeacon === "function"
+      ) {
+        try {
+          const ok = navigator.sendBeacon(
+            "/api/match",
+            new Blob([payload], { type: "application/json" })
+          );
+          if (ok) return;
+        } catch {
+          /* beacon unavailable */
+        }
+      }
+
+      fetch("/api/match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        keepalive: preferBeacon,
+      }).catch(() => {});
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!userId) return;
+    notifyMatchLeave(userId);
+  }, [userId, notifyMatchLeave]);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (!userId) return;
+      if (modeRef.current !== "matching" && modeRef.current !== "room") return;
+      notifyMatchLeave(userId, true);
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [userId, notifyMatchLeave]);
+
   useEffect(() => {
     try { localStorage.setItem("tino_diamonds", String(diamonds)); } catch {}
   }, [diamonds]);
@@ -1170,6 +1218,7 @@ export default function Home() {
   }, [loginName, loginGrade, playTTS, unlockAudio]);
 
   const handleLogout = useCallback(() => {
+    notifyMatchLeave(userId);
     try {
       sessionStorage.removeItem("tino_user_id");
       localStorage.removeItem("tino_user_id");
@@ -1183,7 +1232,7 @@ export default function Home() {
     setLoginName("");
     setLoginGrade(0);
     setMode("login");
-  }, []);
+  }, [notifyMatchLeave, userId]);
 
   /* ─── matching ─── */
 
@@ -1201,12 +1250,8 @@ export default function Home() {
     seenMsgIds.current.clear();
     lastPollTimeRef.current = 0;
 
-    fetch("/api/match", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "leave", userId }),
-    }).catch(() => {});
-  }, [sessionDiamonds, userId]);
+    notifyMatchLeave(userId);
+  }, [notifyMatchLeave, sessionDiamonds, userId]);
 
   const enterRoom = useCallback(
     (rid: string, p: RoomPartner) => {
@@ -1269,13 +1314,9 @@ export default function Home() {
 
   const cancelMatch = useCallback(() => {
     if (matchPollRef.current) clearInterval(matchPollRef.current);
-    fetch("/api/match", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "leave", userId }),
-    }).catch(() => {});
+    notifyMatchLeave(userId);
     setMode("companion");
-  }, [userId]);
+  }, [notifyMatchLeave, userId]);
 
   /* cleanup match polling on unmount */
   useEffect(() => {
