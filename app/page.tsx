@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import DeviceFrame from "@/components/DeviceFrame";
 import TinoAvatar from "@/components/TinoAvatar";
 import type {
@@ -12,7 +12,16 @@ import type {
 
 /* ───────── constants ───────── */
 
-const GREETING = "嗨！我是 Tino～\n你的英语聊天小助手！\n今天先来一句：How is your day going?";
+const INITIAL_GREETINGS = [
+  "嗨！我是 Tino～\n你的英语聊天小助手！\n今天先来一句：How is your day going?",
+  "嗨～我是 Tino！\n想和你一起练英语～\n先试试这句：How are you today?",
+  "你好呀！我是 Tino～\n我们来随便聊聊吧！\n开头可以说：What did you do today?",
+  "嗨！Tino 在这儿～\n今天想练哪句？\n比如：How is your day going?",
+];
+
+function pickInitialGreeting(): string {
+  return INITIAL_GREETINGS[Math.floor(Math.random() * INITIAL_GREETINGS.length)];
+}
 
 const ROOM_DURATION = 300;
 
@@ -36,6 +45,27 @@ type CompanionMemory = {
 
 function containsChinese(text: string): boolean {
   return /[\u4e00-\u9fa5]/.test(text);
+}
+
+/** 中文与英文发音相同/极相近的常用词，直接采用英文，不弹翻译框、不要求用户再说英文 */
+const SAME_PRONUNCIATION_MAP: Record<string, string> = {
+  "嗨": "Hi",
+  "嗨。": "Hi",
+  "哈喽": "Hello",
+  "哈啰": "Hello",
+  "拜拜": "Bye bye",
+  "拜拜。": "Bye bye",
+  "酷": "Cool",
+};
+
+function normalizeForPronunciationLookup(text: string): string {
+  return text.replace(/[。！？\s]+$/g, "").trim();
+}
+
+/** 若整句是「中英同音」词，返回对应英文；否则返回 null */
+function getEnglishIfSamePronunciation(text: string): string | null {
+  const normalized = normalizeForPronunciationLookup(text);
+  return SAME_PRONUNCIATION_MAP[normalized] ?? null;
 }
 
 function scoreEnglish(text: string): number {
@@ -79,10 +109,16 @@ function loadCompanionMemory(name: string, grade: number): CompanionMemory {
     const raw = localStorage.getItem(getCompanionMemoryKey(name, grade));
     if (!raw) return createEmptyCompanionMemory();
     const parsed = JSON.parse(raw) as Partial<CompanionMemory>;
+    const sanitizedMemories = Array.isArray(parsed.memories)
+      ? parsed.memories
+          .map((item) => toPreferenceMemory(String(item || "")))
+          .filter((item): item is string => Boolean(item))
+          .slice(0, 6)
+      : [];
     return {
       ...createEmptyCompanionMemory(),
       ...parsed,
-      memories: Array.isArray(parsed.memories) ? parsed.memories.slice(0, 6) : [],
+      memories: sanitizedMemories,
     };
   } catch {
     return createEmptyCompanionMemory();
@@ -104,20 +140,116 @@ function persistCompanionMemory(
   }
 }
 
-function pickMemorySnippet(text: string): string | null {
-  const cleaned = text.replace(/\s+/g, " ").trim();
-  if (cleaned.length < 4) return null;
-  if (/[?？]$/.test(cleaned) && cleaned.length < 12) return null;
+function normalizeMemoryText(text: string): string {
+  return text
+    .replace(/[“”"'`]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/[。！？!?，,；;：:]+$/g, "")
+    .trim();
+}
 
-  const meaningfulPattern =
-    /(我叫|我是|我喜欢|我最喜欢|今天|因为|想要|my name is|i am|i'm|i like|i love|my favorite|today|because)/i;
-  const englishWords = cleaned.match(/[a-zA-Z]{2,}/g) || [];
+const INVALID_ENGLISH_MEMORY_TOPICS = new Set([
+  "i",
+  "you",
+  "he",
+  "she",
+  "it",
+  "we",
+  "they",
+  "me",
+  "him",
+  "her",
+  "us",
+  "them",
+  "this",
+  "that",
+  "these",
+  "those",
+  "someone",
+  "somebody",
+  "anyone",
+  "anybody",
+  "everyone",
+  "everybody",
+  "something",
+  "anything",
+  "nothing",
+  "everything",
+]);
 
-  if (!meaningfulPattern.test(cleaned) && englishWords.length < 4 && cleaned.length < 10) {
-    return null;
+function isQuestionLikeMemory(text: string): boolean {
+  if (!text) return true;
+  if ((text.match(/[?？]/g) || []).length > 0) return true;
+  return /(什么|怎么|为什么|吗|呢|是不是|可不可以|能不能|刚才|听懂|意思|问的是什么|在干嘛)/.test(
+    text
+  );
+}
+
+function isValidPreferenceTopic(topic: string): boolean {
+  if (!topic) return false;
+
+  const lower = topic.toLowerCase();
+  if (INVALID_ENGLISH_MEMORY_TOPICS.has(lower)) return false;
+  if (/^(这个|那个|这些|那些|这个东西|那个东西|事情|东西|问题|内容)$/.test(topic)) {
+    return false;
   }
 
-  return cleaned.slice(0, 48);
+  const englishWords = lower.match(/[a-z]+/g) || [];
+  if (englishWords.length > 0) {
+    if (englishWords.length > 3) return false;
+    if (englishWords.some((word) => INVALID_ENGLISH_MEMORY_TOPICS.has(word))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function normalizePreferenceTopic(rawTopic: string): string | null {
+  const topic = normalizeMemoryText(rawTopic)
+    .replace(/^(是|就是|都?是|特别是|最喜欢|喜欢|爱|最爱)/, "")
+    .replace(/^(一个|一些|那个|这个)/, "")
+    .replace(/^(a|an|the|my|your|his|her|our|their)\s+/i, "")
+    .replace(/\s+(very much|a lot|so much|too)$/i, "")
+    .replace(/(呀|啊|啦|呢|哦)+$/g, "")
+    .trim();
+
+  if (!topic || topic.length < 2 || topic.length > 20) return null;
+  if (isQuestionLikeMemory(topic)) return null;
+  if (!isValidPreferenceTopic(topic)) return null;
+  return topic;
+}
+
+function toPreferenceMemory(text: string): string | null {
+  const cleaned = normalizeMemoryText(text);
+  if (!cleaned || isQuestionLikeMemory(cleaned)) return null;
+
+  const zhLikeMatch = cleaned.match(
+    /(我最喜欢|我喜欢|我最爱|我爱|我的爱好是|我平时喜欢|我特别喜欢)([^，。！？!?]{1,20})/
+  );
+  if (zhLikeMatch) {
+    const topic = normalizePreferenceTopic(zhLikeMatch[2]);
+    if (topic) return `你喜欢${topic}`;
+  }
+
+  const enLikeMatch = cleaned.match(
+    /\b(?:i like|i love|my favorite(?:\s+\w+)? is)\s+([a-z][a-z\s]{0,24})/i
+  );
+  if (enLikeMatch) {
+    const topic = normalizePreferenceTopic(enLikeMatch[1]);
+    if (topic) return `你喜欢${topic}`;
+  }
+
+  if (/^你喜欢/.test(cleaned) && !isQuestionLikeMemory(cleaned)) {
+    const topic = normalizePreferenceTopic(cleaned.replace(/^你喜欢/, ""));
+    if (topic) return `你喜欢${topic}`;
+  }
+
+  return null;
+}
+
+function pickMemorySnippet(text: string): string | null {
+  return toPreferenceMemory(text);
 }
 
 function updateCompanionMemory(
@@ -180,8 +312,11 @@ function buildCompanionGreeting(
 ): string {
   const remembered = memory.memories[0];
 
-  if (remembered) {
-    return `嗨，${name}！我还记得你之前提过“${remembered}”。\n我们今天就接着这个话题聊，好吗？`;
+  if (remembered && remembered.startsWith("你喜欢")) {
+    const topic = remembered.replace(/^你喜欢/, "").trim();
+    if (topic) {
+      return `嗨，${name}！我记得你上次好像提到过，你挺喜欢${topic}。\n如果你愿意，我们可以先从${topic}聊起，或者说说你今天过得怎么样。`;
+    }
   }
 
   return `嗨，${name}！今天先练一句很自然的英文：How is your day going?\n你先用这句话开头就好。`;
@@ -223,9 +358,12 @@ export default function Home() {
   const [partner, setPartner] = useState<RoomPartner | null>(null);
   const [roomId, setRoomId] = useState("");
 
+  /* 初始问候语随机选一条，每次进入页面不同 */
+  const initialGreeting = useMemo(() => pickInitialGreeting(), []);
+
   /* chat context */
-  const [companionMsgs, setCompanionMsgs] = useState<Message[]>([
-    { id: "g", sender: "tino", content: GREETING, timestamp: Date.now() },
+  const [companionMsgs, setCompanionMsgs] = useState<Message[]>(() => [
+    { id: "g", sender: "tino", content: initialGreeting, timestamp: Date.now() },
   ]);
   const [roomMsgs, setRoomMsgs] = useState<Message[]>([]);
   const [turnCount, setTurnCount] = useState(0);
@@ -233,13 +371,20 @@ export default function Home() {
   const companionMemoryRef = useRef<CompanionMemory>(createEmptyCompanionMemory());
 
   /* companion display */
-  const [displayText, setDisplayText] = useState(GREETING);
+  const [displayText, setDisplayText] = useState(initialGreeting);
 
   /* recording */
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [recordingError, setRecordingError] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  useEffect(() => {
+    if (!recordingError) return;
+    const t = setTimeout(() => setRecordingError(""), 3500);
+    return () => clearTimeout(t);
+  }, [recordingError]);
+
 
   /* room */
   const [timeLeft, setTimeLeft] = useState(ROOM_DURATION);
@@ -770,6 +915,16 @@ export default function Home() {
       audioPayload?: { audioBase64?: string; mimeType?: string }
     ) => {
       if (containsChinese(text)) {
+        const englishSame = getEnglishIfSamePronunciation(text);
+        if (englishSame != null) {
+          /* 中英同音（如 嗨=Hi）：直接当英文发送，不弹翻译、不要求再说英文 */
+          sendRoom({
+            text: englishSame,
+            audioBase64: audioPayload?.audioBase64,
+            mimeType: audioPayload?.mimeType,
+          });
+          return;
+        }
         setTranslationPopup({ chinese: text, english: "", loading: true });
         try {
           const res = await fetch("/api/translate", {
@@ -780,13 +935,13 @@ export default function Home() {
           const data = await res.json();
           setTranslationPopup({
             chinese: text,
-            english: data.english || "I want to say something!",
+            english: data.english || "",
             loading: false,
           });
         } catch {
           setTranslationPopup({
             chinese: text,
-            english: "I want to say something!",
+            english: "",
             loading: false,
           });
         }
@@ -803,9 +958,12 @@ export default function Home() {
 
   const sendMessage = useCallback(
     (text: string) => {
-      if (!text.trim()) return;
-      if (modeRef.current === "room") handleRoomMessage(text.trim());
-      else sendCompanion(text.trim());
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      /* 中英同音（如 嗨=Hi）统一用英文，不要求用户再说英文 */
+      const toSend = getEnglishIfSamePronunciation(trimmed) ?? trimmed;
+      if (modeRef.current === "room") handleRoomMessage(toSend);
+      else sendCompanion(toSend);
     },
     [sendCompanion, handleRoomMessage]
   );
@@ -874,6 +1032,16 @@ export default function Home() {
     unlockAudio();
     highlightSpeaker("user");
     try {
+      setRecordingError("");
+      if (!window.isSecureContext) {
+        throw new Error("请使用 HTTPS 或本机 localhost 打开，手机网页在非安全连接下不能录音");
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("当前浏览器不支持麦克风录音");
+      }
+      if (typeof MediaRecorder === "undefined") {
+        throw new Error("当前浏览器不支持语音录制");
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const supportedTypes = [
         "audio/webm;codecs=opus",
@@ -933,8 +1101,10 @@ export default function Home() {
       recorder.start();
       recorderRef.current = recorder;
       setIsRecording(true);
-    } catch {
-      /* mic denied */
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "无法使用麦克风，请检查权限设置";
+      setRecordingError(message);
     }
   }, [isPowered, isRecording, sendMessage, sendRoom, handleRoomMessage, highlightSpeaker, unlockAudio]);
 
@@ -942,6 +1112,7 @@ export default function Home() {
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
       recorderRef.current.stop();
     }
+    setRecordingError("");
     setIsRecording(false);
   }, []);
 
@@ -1202,7 +1373,9 @@ export default function Home() {
         ? "waving"
         : ("happy" as const);
 
-  const statusText = isRecording
+  const statusText = recordingError
+    ? recordingError
+    : isRecording
     ? "正在听你说..."
     : isTranscribing
       ? "识别中..."
@@ -1212,7 +1385,9 @@ export default function Home() {
           ? "在说话..."
           : "按住右侧按钮说话";
 
-  const statusIcon = isRecording
+  const statusIcon = recordingError
+    ? "⚠️"
+    : isRecording
     ? "🔴"
     : isTranscribing
       ? "⏳"
@@ -1477,10 +1652,12 @@ export default function Home() {
                 <p className="text-[10px] text-gray-400 mb-1">用英文可以这样说：</p>
                 {translationPopup.loading ? (
                   <p className="text-sm text-tino-orange animate-pulse my-2">翻译中...</p>
-                ) : (
+                ) : translationPopup.english ? (
                   <p className="text-sm font-bold text-tino-orange leading-snug">
                     {translationPopup.english}
                   </p>
+                ) : (
+                  <p className="text-sm text-gray-400 my-2">翻译失败，请重试</p>
                 )}
               </div>
             </div>

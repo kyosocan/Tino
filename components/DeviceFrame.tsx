@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 type Props = {
   children: React.ReactNode;
@@ -23,78 +23,97 @@ export default function DeviceFrame({
   isRecording,
   isSpeaking,
 }: Props) {
-  const voiceBtnRef = useRef<HTMLDivElement>(null);
-  const volUpRef = useRef<HTMLDivElement>(null);
-  const volDownRef = useRef<HTMLDivElement>(null);
-  const powerRef = useRef<HTMLDivElement>(null);
-  const touchedRef = useRef(false);
-  const recordingRef = useRef(isRecording);
-  useEffect(() => { recordingRef.current = isRecording; }, [isRecording]);
+  const pressHandledRef = useRef(false);
+  const touchRecordingRef = useRef(false);
 
   const cbRefs = useRef({ onVoiceStart, onVoiceEnd, onVolumeUp, onVolumeDown, onPower });
   useEffect(() => {
     cbRefs.current = { onVoiceStart, onVoiceEnd, onVolumeUp, onVolumeDown, onPower };
   }, [onVoiceStart, onVoiceEnd, onVolumeUp, onVolumeDown, onPower]);
 
-  useEffect(() => {
-    const voice = voiceBtnRef.current;
-    const volUp = volUpRef.current;
-    const volDown = volDownRef.current;
-    const power = powerRef.current;
-    if (!voice) return;
+  const handleVoicePressStart = useCallback(() => {
+    if (touchRecordingRef.current || isRecording) return;
+    touchRecordingRef.current = true;
+    cbRefs.current.onVoiceStart();
+  }, [isRecording]);
 
-    const onTouchStart = (e: TouchEvent) => {
+  const handleVoicePressEnd = useCallback(() => {
+    if (!touchRecordingRef.current && !isRecording) return;
+    touchRecordingRef.current = false;
+    cbRefs.current.onVoiceEnd();
+  }, [isRecording]);
+
+  const handleVoicePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.pointerType === "mouse") return;
       e.preventDefault();
-      e.stopPropagation();
-      touchedRef.current = true;
-      cbRefs.current.onVoiceStart();
-    };
-    const onTouchEnd = (e: TouchEvent) => {
+      pressHandledRef.current = true;
+      handleVoicePressStart();
+    },
+    [handleVoicePressStart]
+  );
+
+  const handleVoicePointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.pointerType === "mouse") return;
       e.preventDefault();
-      e.stopPropagation();
-      touchedRef.current = true;
-      cbRefs.current.onVoiceEnd();
-    };
-    const onClick = () => {
-      if (touchedRef.current) { touchedRef.current = false; return; }
-      if (recordingRef.current) cbRefs.current.onVoiceEnd();
-      else cbRefs.current.onVoiceStart();
-    };
+      pressHandledRef.current = true;
+      handleVoicePressEnd();
+    },
+    [handleVoicePressEnd]
+  );
 
-    voice.addEventListener("touchstart", onTouchStart, { passive: false });
-    voice.addEventListener("touchend", onTouchEnd, { passive: false });
-    voice.addEventListener("click", onClick);
+  const handleVoiceTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      pressHandledRef.current = true;
+      handleVoicePressStart();
+    },
+    [handleVoicePressStart]
+  );
 
-    const makeTap = (fn: () => void) => {
-      let tapped = false;
-      const ts = (e: TouchEvent) => { e.preventDefault(); tapped = true; fn(); };
-      const cl = () => { if (tapped) { tapped = false; return; } fn(); };
-      return { ts, cl };
-    };
+  const handleVoiceTouchEnd = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      pressHandledRef.current = true;
+      handleVoicePressEnd();
+    },
+    [handleVoicePressEnd]
+  );
 
-    const vu = makeTap(() => cbRefs.current.onVolumeUp());
-    const vd = makeTap(() => cbRefs.current.onVolumeDown());
-    const pw = makeTap(() => cbRefs.current.onPower());
+  const handleVoiceClick = useCallback(() => {
+    if (pressHandledRef.current) {
+      pressHandledRef.current = false;
+      return;
+    }
+    if (isRecording) handleVoicePressEnd();
+    else handleVoicePressStart();
+  }, [handleVoicePressEnd, handleVoicePressStart, isRecording]);
 
-    volUp?.addEventListener("touchstart", vu.ts, { passive: false });
-    volUp?.addEventListener("click", vu.cl);
-    volDown?.addEventListener("touchstart", vd.ts, { passive: false });
-    volDown?.addEventListener("click", vd.cl);
-    power?.addEventListener("touchstart", pw.ts, { passive: false });
-    power?.addEventListener("click", pw.cl);
+  const makeTapHandlers = useCallback((fn: () => void) => ({
+    onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.pointerType === "mouse") return;
+      e.preventDefault();
+      pressHandledRef.current = true;
+      fn();
+    },
+    onTouchStart: (e: React.TouchEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      pressHandledRef.current = true;
+      fn();
+    },
+    onClick: () => {
+      if (pressHandledRef.current) {
+        pressHandledRef.current = false;
+        return;
+      }
+      fn();
+    },
+  }), []);
 
-    return () => {
-      voice.removeEventListener("touchstart", onTouchStart);
-      voice.removeEventListener("touchend", onTouchEnd);
-      voice.removeEventListener("click", onClick);
-      volUp?.removeEventListener("touchstart", vu.ts);
-      volUp?.removeEventListener("click", vu.cl);
-      volDown?.removeEventListener("touchstart", vd.ts);
-      volDown?.removeEventListener("click", vd.cl);
-      power?.removeEventListener("touchstart", pw.ts);
-      power?.removeEventListener("click", pw.cl);
-    };
-  }, []);
+  const powerHandlers = makeTapHandlers(() => cbRefs.current.onPower());
+  const volUpHandlers = makeTapHandlers(() => cbRefs.current.onVolumeUp());
+  const volDownHandlers = makeTapHandlers(() => cbRefs.current.onVolumeDown());
 
   const btnBase =
     "cursor-pointer shadow-md transition-colors bg-gradient-to-b from-[#C8C8C8] to-[#A8A8A8] active:from-[#909090] active:to-[#808080]";
@@ -106,25 +125,25 @@ export default function DeviceFrame({
         {/* ── Left side buttons ── */}
         <div className="relative flex-shrink-0" style={{ width: 12 }}>
           <div
-            ref={powerRef}
             role="button"
             tabIndex={0}
             className={`absolute ${btnBase} w-full h-[30px] rounded-l-[3px]`}
             style={{ top: "9%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            {...powerHandlers}
           />
           <div
-            ref={volUpRef}
             role="button"
             tabIndex={0}
             className={`absolute ${btnBase} w-full h-[38px] rounded-l-[3px]`}
             style={{ top: "22%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            {...volUpHandlers}
           />
           <div
-            ref={volDownRef}
             role="button"
             tabIndex={0}
             className={`absolute ${btnBase} w-full h-[38px] rounded-l-[3px]`}
             style={{ top: "35%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            {...volDownHandlers}
           />
         </div>
 
@@ -173,9 +192,8 @@ export default function DeviceFrame({
         </div>
 
         {/* ── Right: Voice button ── */}
-        <div className="relative flex-shrink-0" style={{ width: 22 }}>
+        <div className="relative flex-shrink-0" style={{ width: 28 }}>
           <div
-            ref={voiceBtnRef}
             role="button"
             tabIndex={0}
             className={`absolute w-full h-[120px] rounded-r-[5px] shadow-md cursor-pointer transition-all ${
@@ -184,6 +202,13 @@ export default function DeviceFrame({
                 : "bg-gradient-to-b from-[#C8C8C8] to-[#A8A8A8] active:from-[#909090] active:to-[#808080]"
             }`}
             style={{ top: "20%", right: 0, touchAction: "none", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            onPointerDown={handleVoicePointerDown}
+            onPointerUp={handleVoicePointerUp}
+            onPointerCancel={handleVoicePointerUp}
+            onTouchStart={handleVoiceTouchStart}
+            onTouchEnd={handleVoiceTouchEnd}
+            onTouchCancel={handleVoiceTouchEnd}
+            onClick={handleVoiceClick}
           />
         </div>
       </div>

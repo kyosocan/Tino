@@ -26,9 +26,18 @@ type ArkResponse = {
 const ARK_URL = "https://ark.cn-beijing.volces.com/api/v3/responses";
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
-function getArkConfig() {
+type DoubaoCallOptions = {
+  model?: string;
+  timeoutMs?: number;
+  retries?: number;
+};
+
+function getArkConfig(modelOverride?: string) {
   const apiKey = process.env.ARK_API_KEY || "";
-  const model = process.env.ARK_MODEL || "doubao-seed-2-0-lite-260215";
+  const model =
+    modelOverride ||
+    process.env.ARK_MODEL ||
+    "doubao-seed-2-0-lite-260215";
   if (!apiKey) throw new Error("缺少 ARK_API_KEY");
   return { apiKey, model };
 }
@@ -133,13 +142,21 @@ export async function callDoubaoStream(
   });
 }
 
-export async function callDoubao(messages: ChatMessage[]) {
-  const cfg = getArkConfig();
+export async function callDoubao(
+  messages: ChatMessage[],
+  options: DoubaoCallOptions = {}
+) {
+  const cfg = getArkConfig(options.model);
   const input = toArkInput(messages);
   let lastError: Error | null = null;
+  const retries = Math.max(1, Math.floor(options.retries ?? 3));
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
+      const controller = new AbortController();
+      const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? 30_000));
+      timeout = setTimeout(() => controller.abort(), timeoutMs);
       const response = await fetch(ARK_URL, {
         method: "POST",
         headers: {
@@ -147,12 +164,15 @@ export async function callDoubao(messages: ChatMessage[]) {
           Authorization: `Bearer ${cfg.apiKey}`,
         },
         body: JSON.stringify({ model: cfg.model, input }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
+      timeout = null;
 
       if (!response.ok) {
         const detail = await response.text();
         const err = new Error(`Ark 调用失败 ${response.status}: ${detail}`);
-        if (!RETRYABLE_STATUS.has(response.status) || attempt >= 3) throw err;
+        if (!RETRYABLE_STATUS.has(response.status) || attempt >= retries) throw err;
         lastError = err;
         console.warn(`[Ark] 第 ${attempt} 次请求失败(${response.status})，重试中...`);
         await sleep(computeDelayMs(attempt));
@@ -163,8 +183,9 @@ export async function callDoubao(messages: ChatMessage[]) {
       if (data.error) throw new Error(`Ark 业务错误: ${data.error.message || data.error.code}`);
       return extractText(data);
     } catch (error) {
+      if (timeout) clearTimeout(timeout);
       const err = error instanceof Error ? error : new Error(String(error));
-      if (attempt >= 3) throw err;
+      if (attempt >= retries) throw err;
       lastError = err;
       console.warn(`[Ark] 第 ${attempt} 次异常，重试中...`, err.message);
       await sleep(computeDelayMs(attempt));

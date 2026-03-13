@@ -7,20 +7,30 @@ import ChatBubble from "./ChatBubble";
 import ChatInput from "./ChatInput";
 import ShakeButton from "./ShakeButton";
 
-const GREETING: Message = {
-  id: "greeting",
-  sender: "tino",
-  content:
-    "嗨！我是 Tino，一只来自语言星球的小狐狸～\n今天想聊点什么呀？What do you want to talk about?",
-  timestamp: Date.now(),
-};
+const GREETING_OPTIONS = [
+  "嗨！我是 Tino，一只来自语言星球的小狐狸～\n今天想聊点什么呀？What do you want to talk about?",
+  "你好呀～我是 Tino！\n想聊什么都可以哦。What would you like to talk about?",
+  "嗨！Tino 来啦～\n我们随便聊聊吧！Do you want to talk about your day?",
+  "你好！我是小狐狸 Tino～\n今天想说什么？What do you want to talk about?",
+];
+
+function pickGreetingContent(): string {
+  return GREETING_OPTIONS[Math.floor(Math.random() * GREETING_OPTIONS.length)];
+}
 
 export default function CompanionChat({
   onStartMatch,
 }: {
   onStartMatch: () => void;
 }) {
-  const [messages, setMessages] = useState<Message[]>([GREETING]);
+  const [messages, setMessages] = useState<Message[]>(() => [
+    {
+      id: "greeting",
+      sender: "tino",
+      content: pickGreetingContent(),
+      timestamp: Date.now(),
+    },
+  ]);
   const [isLoading, setIsLoading] = useState(false);
   const [turnCount, setTurnCount] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);

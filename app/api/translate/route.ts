@@ -21,10 +21,14 @@ export async function POST(req: Request) {
       },
     ];
 
-    const english = await callDoubao(msgs);
-    return Response.json({ english: english || "I want to say something!" });
+    const english = await callDoubao(msgs, {
+      model: process.env.ARK_TRANSLATE_MODEL || "doubao-seed-2-0-lite-260215",
+      timeoutMs: Number(process.env.ARK_TRANSLATE_TIMEOUT_MS || "3500"),
+      retries: 1,
+    });
+    return Response.json({ english: english || "" });
   } catch (error) {
     console.error("[Translate API Error]", error);
-    return Response.json({ english: "I want to say something!" });
+    return Response.json({ english: "" });
   }
 }
