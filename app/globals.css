@@ -171,20 +171,20 @@ body {
 
 /* ── Device scaling ── */
 .device-scale-wrapper {
-  --device-w: 260px;
-  --device-h: 432px;
+  --device-w: 454px;
+  --device-h: 292px;
   width: var(--device-w);
   height: var(--device-h);
   transform-origin: center center;
 }
 
-@media (max-height: 492px) {
+@media (max-height: 340px) {
   .device-scale-wrapper {
-    transform: scale(calc(95dvh / 432));
+    transform: scale(calc(94dvh / var(--device-h)));
   }
 }
-@media (max-width: 296px) {
+@media (max-width: 500px) {
   .device-scale-wrapper {
-    transform: scale(calc(90vw / 260));
+    transform: scale(calc(96vw / var(--device-w)));
   }
 }

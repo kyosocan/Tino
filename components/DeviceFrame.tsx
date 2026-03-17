@@ -25,6 +25,7 @@ export default function DeviceFrame({
 }: Props) {
   const pressHandledRef = useRef(false);
   const touchRecordingRef = useRef(false);
+  const rightBtnRef = useRef<HTMLDivElement>(null);
 
   const cbRefs = useRef({ onVoiceStart, onVoiceEnd, onVolumeUp, onVolumeDown, onPower });
   useEffect(() => {
@@ -115,93 +116,113 @@ export default function DeviceFrame({
   const volUpHandlers = makeTapHandlers(() => cbRefs.current.onVolumeUp());
   const volDownHandlers = makeTapHandlers(() => cbRefs.current.onVolumeDown());
 
+  useEffect(() => {
+    const el = rightBtnRef.current;
+    if (!el) return;
+    const preventSelect = (e: Event) => e.preventDefault();
+    el.addEventListener("selectstart", preventSelect);
+    return () => el.removeEventListener("selectstart", preventSelect);
+  }, []);
+
   const btnBase =
     "cursor-pointer shadow-md transition-colors bg-gradient-to-b from-[#C8C8C8] to-[#A8A8A8] active:from-[#909090] active:to-[#808080]";
+  const deviceWidth = 454;
+  const deviceHeight = 292;
 
   return (
-    <div className="device-scale-wrapper relative">
+    <div
+      className="device-scale-wrapper relative"
+      style={
+        {
+          "--device-w": `${deviceWidth}px`,
+          "--device-h": `${deviceHeight}px`,
+        } as React.CSSProperties
+      }
+    >
       {/* Flex layout: [left btns] [device body] [right btn] */}
-      <div className="flex" style={{ width: 260, height: 432 }}>
+      <div className="flex items-center" style={{ width: deviceWidth, height: deviceHeight }}>
         {/* ── Left side buttons ── */}
-        <div className="relative flex-shrink-0" style={{ width: 12 }}>
+        <div className="relative flex-shrink-0" style={{ width: 14, height: deviceHeight - 28 }}>
           <div
             role="button"
             tabIndex={0}
-            className={`absolute ${btnBase} w-full h-[30px] rounded-l-[3px]`}
-            style={{ top: "9%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            className={`absolute ${btnBase} w-full h-[26px] rounded-l-[4px]`}
+            style={{ top: "14%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
             {...powerHandlers}
           />
           <div
             role="button"
             tabIndex={0}
-            className={`absolute ${btnBase} w-full h-[38px] rounded-l-[3px]`}
-            style={{ top: "22%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            className={`absolute ${btnBase} w-full h-[34px] rounded-l-[4px]`}
+            style={{ top: "36%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
             {...volUpHandlers}
           />
           <div
             role="button"
             tabIndex={0}
-            className={`absolute ${btnBase} w-full h-[38px] rounded-l-[3px]`}
-            style={{ top: "35%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            className={`absolute ${btnBase} w-full h-[34px] rounded-l-[4px]`}
+            style={{ top: "54%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
             {...volDownHandlers}
           />
         </div>
 
         {/* ── Device body ── */}
         <div
-          className="relative flex-1 rounded-[22px] bg-gradient-to-b from-[#EAEAEA] to-[#D0D0D0]"
+          className="relative h-full flex-1 rounded-[28px] bg-gradient-to-b from-[#ECECEC] via-[#DCDCDC] to-[#CBCBCB]"
           style={{
             boxShadow:
               "0 12px 48px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.6), inset 0 -1px 0 rgba(0,0,0,0.08)",
           }}
         >
-          {/* ── Screen ── */}
+          <div
+            className="absolute left-1/2 top-[10px] h-[4px] w-16 -translate-x-1/2 rounded-full bg-black/20"
+            aria-hidden="true"
+          />
+          {/* ── 2.8 寸横屏 ── */}
           <div
             className="absolute overflow-hidden bg-tino-cream"
             style={{
-              left: "5%",
-              right: "5%",
-              top: "3%",
-              bottom: "36%",
-              borderRadius: 10,
+              left: "9.5%",
+              right: "9.5%",
+              top: "10.5%",
+              bottom: "10.5%",
+              borderRadius: 16,
               border: "2px solid #3A3A3A",
             }}
           >
             {children}
           </div>
-
-          {/* ── Speaker grills ── */}
-          <div
-            className="absolute left-1/2 -translate-x-1/2 pointer-events-none"
-            style={{ bottom: "8%", width: "40%", aspectRatio: "1" }}
-          >
-            {[0, 18, 34, 48].map((inset) => (
-              <div
-                key={inset}
-                className="absolute rounded-full border border-[#B8B8B8]"
-                style={{ inset: `${inset}%` }}
-              />
-            ))}
-          </div>
-
-          {/* ── Mic hole ── */}
-          <div
-            className="absolute left-1/2 -translate-x-1/2 w-[4px] h-[4px] rounded-full bg-[#777]"
-            style={{ bottom: "3%" }}
-          />
         </div>
 
-        {/* ── Right: Voice button ── */}
-        <div className="relative flex-shrink-0" style={{ width: 28 }}>
+        {/* ── Right: Voice button（长按不触发选中文字）── */}
+        <div
+          className="relative flex-shrink-0 select-none"
+          style={{
+            width: 34,
+            height: deviceHeight - 40,
+            WebkitUserSelect: "none",
+            userSelect: "none",
+            WebkitTouchCallout: "none",
+          }}
+        >
           <div
             role="button"
             tabIndex={0}
-            className={`absolute w-full h-[120px] rounded-r-[5px] shadow-md cursor-pointer transition-all ${
+            className={`absolute w-full h-[92px] rounded-r-[8px] shadow-md cursor-pointer transition-all select-none ${
               isRecording
                 ? "bg-red-500 shadow-[0_0_16px_rgba(239,68,68,0.5)]"
                 : "bg-gradient-to-b from-[#C8C8C8] to-[#A8A8A8] active:from-[#909090] active:to-[#808080]"
             }`}
-            style={{ top: "20%", right: 0, touchAction: "none", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            style={{
+              top: "50%",
+              right: 0,
+              transform: "translateY(-50%)",
+              touchAction: "none",
+              WebkitTapHighlightColor: "rgba(0,0,0,0.1)",
+              WebkitUserSelect: "none",
+              userSelect: "none",
+              WebkitTouchCallout: "none",
+            }}
             onPointerDown={handleVoicePointerDown}
             onPointerUp={handleVoicePointerUp}
             onPointerCancel={handleVoicePointerUp}
@@ -209,6 +230,8 @@ export default function DeviceFrame({
             onTouchEnd={handleVoiceTouchEnd}
             onTouchCancel={handleVoiceTouchEnd}
             onClick={handleVoiceClick}
+            onContextMenu={(e) => e.preventDefault()}
+            ref={rightBtnRef}
           />
         </div>
       </div>

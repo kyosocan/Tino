@@ -1,8 +1,10 @@
 "use client";
 
+import Image from "next/image";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import DeviceFrame from "@/components/DeviceFrame";
 import TinoAvatar from "@/components/TinoAvatar";
+import tinoPortrait from "@/scripts/ai_api/人物像.png";
 import type {
   Message,
   AppMode,
@@ -13,10 +15,10 @@ import type {
 /* ───────── constants ───────── */
 
 const INITIAL_GREETINGS = [
-  "嗨！我是 Tino～\n你的英语聊天小助手！\n今天先来一句：How is your day going?",
-  "嗨～我是 Tino！\n想和你一起练英语～\n先试试这句：How are you today?",
-  "你好呀！我是 Tino～\n我们来随便聊聊吧！\n开头可以说：What did you do today?",
-  "嗨！Tino 在这儿～\n今天想练哪句？\n比如：How is your day going?",
+  "试着这样开场：\nHow is your day going?\n你先用这句开始就好。",
+  "先说这一句：\nHow are you today?\n轻松一点就好。",
+  "今天可以这样开头：\nWhat did you do today?\n我会陪你接着聊。",
+  "想不到说什么时，就先说：\nHow is your day going?\n然后我来接住你。",
 ];
 
 function pickInitialGreeting(): string {
@@ -315,11 +317,17 @@ function buildCompanionGreeting(
   if (remembered && remembered.startsWith("你喜欢")) {
     const topic = remembered.replace(/^你喜欢/, "").trim();
     if (topic) {
-      return `嗨，${name}！我记得你上次好像提到过，你挺喜欢${topic}。\n如果你愿意，我们可以先从${topic}聊起，或者说说你今天过得怎么样。`;
+      return `嗨，${name}！\n先聊聊${topic}？\n或者说说今天。`;
     }
   }
 
-  return `嗨，${name}！今天先练一句很自然的英文：How is your day going?\n你先用这句话开头就好。`;
+  return `嗨，${name}！\nHow is your day going?\n先从这句开始。`;
+}
+
+function extractPromptHeadline(line: string): string {
+  return line
+    .replace(/^(先试试这句|试着这样开场|先说这一句|今天可以这样开头|开头可以说|想不到说什么时，就先说)[：:]\s*/u, "")
+    .trim();
 }
 
 /* ───────── avatar frames ───────── */
@@ -578,12 +586,17 @@ export default function Home() {
     if (ctx.state === "suspended") ctx.resume();
 
     if (!motionGrantedRef.current) {
-      motionGrantedRef.current = true;
+      motionGrantedRef.current = true; // 防止并发重复请求
       const DM = DeviceMotionEvent as unknown as {
         requestPermission?: () => Promise<string>;
       };
       if (typeof DM.requestPermission === "function") {
-        DM.requestPermission().catch(() => {});
+        // 必须在同步用户手势上下文里调用，此处满足（unlockAudio 由触摸/点击事件触发）
+        DM.requestPermission()
+          .then((result) => {
+            if (result !== "granted") motionGrantedRef.current = false; // 拒绝后允许下次再试
+          })
+          .catch(() => { motionGrantedRef.current = false; });
       }
     }
   }, []);
@@ -599,9 +612,11 @@ export default function Home() {
       speaker?: string,
       onPlayStart?: () => void
     ) => {
+      if (!audioBase64) return;
+      unlockAudio();
       const ctx = audioCtxRef.current;
       const gain = gainNodeRef.current;
-      if (!ctx || !gain || !audioBase64) return;
+      if (!ctx || !gain) return;
 
       ttsPending.current++;
       setIsSpeaking(true);
@@ -654,11 +669,12 @@ export default function Home() {
         }
       });
     },
-    [highlightSpeaker]
+    [highlightSpeaker, unlockAudio]
   );
 
   const playTTS = useCallback(
     (text: string, speaker?: string, onPlayStart?: () => void) => {
+      unlockAudio();
       const audioReady = (async (): Promise<AudioBuffer | null> => {
         try {
           const res = await fetch("/api/tts", {
@@ -718,7 +734,7 @@ export default function Home() {
         });
       });
     },
-    [highlightSpeaker]
+    [highlightSpeaker, unlockAudio]
   );
 
   /* companion display auto-scroll */
@@ -974,25 +990,32 @@ export default function Home() {
           return;
         }
         setTranslationPopup({ chinese: text, english: "", loading: true });
-        try {
-          const res = await fetch("/api/translate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
-          });
-          const data = await res.json();
-          setTranslationPopup({
-            chinese: text,
-            english: data.english || "",
-            loading: false,
-          });
-        } catch {
-          setTranslationPopup({
-            chinese: text,
-            english: "",
-            loading: false,
-          });
+        const maxAttempts = 3;
+        let lastEnglish = "";
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            const res = await fetch("/api/translate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text }),
+            });
+            const data = await res.json();
+            const english = (data.english || "").trim();
+            if (english) {
+              setTranslationPopup({ chinese: text, english, loading: false });
+              return;
+            }
+            lastEnglish = english;
+            if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 400 * attempt));
+          } catch {
+            if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 400 * attempt));
+          }
         }
+        setTranslationPopup({
+          chinese: text,
+          english: lastEnglish,
+          loading: false,
+        });
         return;
       }
       sendRoom({
@@ -1333,13 +1356,15 @@ export default function Home() {
   useEffect(() => {
     if (!isPowered) return;
 
-    const THRESHOLD = 25;
-    const SHAKE_COUNT = 3;
-    const SHAKE_WINDOW = 800;
+    const THRESHOLD = 12;   // 更灵敏（原 25）
+    const SHAKE_COUNT = 2;  // 只需 2 次（原 3 次）
+    const SHAKE_WINDOW = 1200; // 时间窗口拉宽（原 800ms）
 
     const onMotion = (e: DeviceMotionEvent) => {
       if (modeRef.current !== "companion" || shakeCooldownRef.current) return;
-      const acc = e.accelerationIncludingGravity;
+
+      /* 优先使用去重力的 acceleration，回退到 accelerationIncludingGravity */
+      const acc = e.acceleration ?? e.accelerationIncludingGravity;
       if (!acc) return;
 
       const x = acc.x ?? 0, y = acc.y ?? 0, z = acc.z ?? 0;
@@ -1419,24 +1444,37 @@ export default function Home() {
     : isRecording
     ? "正在听你说..."
     : isTranscribing
-      ? "识别中..."
+      ? "请稍等..."
       : isLoading
-        ? "Tino 在想..."
+        ? "请稍等..."
         : isSpeaking
-          ? "在说话..."
+          ? "听完再继续"
           : "按住右侧按钮说话";
-
   const statusIcon = recordingError
-    ? "⚠️"
+    ? "!"
     : isRecording
-    ? "🔴"
-    : isTranscribing
-      ? "⏳"
-      : isLoading
-        ? "💭"
+      ? "REC"
+      : isTranscribing || isLoading
+        ? "..."
         : isSpeaking
-          ? "🔊"
-          : "🟢";
+          ? "TTS"
+          : "MIC";
+
+  const companionStatusHint = recordingError
+    ? "检查麦克风权限后，再按右侧按键试一次"
+    : isRecording
+      ? "松开右侧按键后发送"
+      : "";
+
+  const companionStatusAccent = recordingError
+    ? "text-red-500"
+    : isRecording
+      ? "text-red-500"
+      : isTranscribing || isLoading
+        ? "text-amber-500"
+        : isSpeaking
+          ? "text-tino-orange"
+          : "text-green-500";
 
   /* ─── room lyrics display ─── */
 
@@ -1558,57 +1596,67 @@ export default function Home() {
           </button>
         </div>
       ) : mode === "companion" ? (
-        /* ── companion: avatar + speech ── */
-        <div className="flex flex-col h-full min-h-0 relative">
+        /* ── companion: VN-style — avatar bottom-left, speech bubble top-right ── */
+        <div className="relative h-full min-h-0 overflow-hidden bg-gradient-to-br from-[#fde8f0] via-[#fff3f7] to-[#f4eeff]">
           {showVolume && (
-            <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+            <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
               <div className="bg-black/60 text-white rounded-2xl px-5 py-3 text-lg font-bold">
                 🔊 {volume}
               </div>
             </div>
           )}
 
-          <div className="flex items-center justify-between px-3 py-2 flex-shrink-0">
-            <button
-              onClick={() => setMode("shop")}
-              className="relative flex items-center gap-1 px-2 py-1 rounded-full bg-violet-50 text-xs font-bold text-violet-600 active:bg-violet-100 transition-colors"
-            >
-              💎 {diamonds}
-              {diamondDelta !== null && (
-                <span className="absolute -top-3 left-full ml-0.5 text-[10px] text-green-500 font-bold diamond-float">
-                  +{diamondDelta}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={startMatch}
-              className="px-2.5 py-1 rounded-full bg-tino-orange/15 text-tino-orange text-xs font-bold active:bg-tino-orange/25 transition-colors"
-            >
-              🌪️ 摇一摇
-            </button>
-          </div>
-
-          <div className="flex-1 flex flex-col items-center justify-center px-5 gap-3 min-h-0">
-            <TinoAvatar
-              size={72}
-              expression={tinoExpr}
-              className={`flex-shrink-0 ${isRecording ? "animate-pulse-soft" : "animate-float"}`}
-            />
-            <div
-              ref={companionBoxRef}
-              className="w-full flex-shrink-0 bg-tino-orange-pale rounded-2xl px-4 py-2 text-center shadow-sm overflow-y-auto"
-              style={{ maxHeight: "5.5em" }}
-            >
-              <p className="text-sm leading-relaxed text-tino-brown whitespace-pre-wrap">
-                {displayText}
+          {/* Speech bubble */}
+          <div
+            className="absolute"
+            style={{ left: 128, right: 10, top: 8, bottom: "26%" }}
+          >
+            {/* bubble body */}
+            <div className="relative z-10 h-full rounded-[20px] border-2 border-[#ecc8d8] bg-[#fff6f9] px-4 py-3 shadow-[0_8px_24px_rgba(164,115,136,0.14)]">
+              <p className="mb-2 text-[9px] font-semibold tracking-[0.26em] text-[#c4a0b0]">
+                T I N O
               </p>
+              <div
+                ref={companionBoxRef}
+                className="overflow-y-auto"
+                style={{ maxHeight: "calc(100% - 28px)" }}
+              >
+                <p className="whitespace-pre-wrap break-words text-[17px] font-black leading-[1.5] text-[#1e1218]">
+                  {displayText}
+                </p>
+              </div>
             </div>
           </div>
 
-          <div className="flex-shrink-0 py-2 text-center">
-            <p className="text-xs font-bold text-tino-brown-light">
-              {statusIcon} {statusText}
-            </p>
+          {/* Status hint — below bubble, vertical layout */}
+          <div
+            className="absolute flex flex-col items-center justify-center gap-1.5"
+            style={{ left: 128, right: 10, bottom: 0, height: "24%" }}
+          >
+            <span className={`text-[12px] font-bold ${companionStatusAccent}`}>
+              {statusText}
+            </span>
+            {companionStatusHint && (
+              <span className="text-[10px] text-[#c4a0b0]">
+                {companionStatusHint}
+              </span>
+            )}
+          </div>
+
+          {/* Avatar — bottom-left corner */}
+          <div
+            className="absolute bottom-0 z-20"
+            style={{ width: 152, height: "100%", left: -8 }}
+          >
+            <Image
+              src={tinoPortrait}
+              alt="Tino"
+              fill
+              sizes="112px"
+              className="object-contain object-bottom"
+              style={{ mixBlendMode: "screen" }}
+              priority
+            />
           </div>
         </div>
       ) : mode === "shop" ? (
