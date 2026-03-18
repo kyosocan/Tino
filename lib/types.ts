@@ -1,4 +1,4 @@
-export type MessageSender = "user" | "tino" | "friend" | "system";
+export type MessageSender = "user" | "tino" | "friend" | "system" | "ai_buddy";
 
 export type Message = {
   id: string;
