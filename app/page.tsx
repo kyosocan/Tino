@@ -364,6 +364,8 @@ export default function Home() {
 
   /* partner (real person) */
   const [partner, setPartner] = useState<RoomPartner | null>(null);
+  const partnerRef = useRef<RoomPartner | null>(null);
+  useEffect(() => { partnerRef.current = partner; }, [partner]);
   const [roomId, setRoomId] = useState("");
 
   /* 初始问候语随机选一条，每次进入页面不同 */
@@ -394,6 +396,11 @@ export default function Home() {
   }, [recordingError]);
 
 
+  /* AI room */
+  const [isAiRoom, setIsAiRoom] = useState(false);
+  const isAiRoomRef = useRef(false);
+  useEffect(() => { isAiRoomRef.current = isAiRoom; }, [isAiRoom]);
+
   /* room */
   const [timeLeft, setTimeLeft] = useState(ROOM_DURATION);
   const [englishCount, setEnglishCount] = useState(0);
@@ -408,6 +415,13 @@ export default function Home() {
 
   /* match polling */
   const matchPollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const matchTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  /* matching UI phase: "waiting" | "ai_found" */
+  const [matchingPhase, setMatchingPhase] = useState<"waiting" | "ai_found">("waiting");
+
+  /* room messages ref (for AI room callbacks) */
+  const roomMsgsRef = useRef<Message[]>([]);
+  useEffect(() => { roomMsgsRef.current = roomMsgs; }, [roomMsgs]);
 
   /* translation popup */
   const [translationPopup, setTranslationPopup] = useState<{
@@ -425,6 +439,11 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [showExitConfirm]);
 
+  /* friends list */
+  type FriendRecord = { name: string; grade: number; lastChatAt: number };
+  const [friendsList, setFriendsList] = useState<FriendRecord[]>([]);
+  const [showFriendsList, setShowFriendsList] = useState(false);
+
   /* diamonds / frames */
   const [diamonds, setDiamonds] = useState(0);
   const [diamondDelta, setDiamondDelta] = useState<number | null>(null);
@@ -439,6 +458,8 @@ export default function Home() {
       if (o) setOwnedFrames(JSON.parse(o));
       const a = localStorage.getItem("tino_active_frame");
       if (a) setActiveFrame(a);
+      const fl = localStorage.getItem("tino_friends_list");
+      if (fl) setFriendsList(JSON.parse(fl));
 
       localStorage.removeItem("tino_user_id");
       const savedUserId = sessionStorage.getItem("tino_user_id");
@@ -922,7 +943,7 @@ export default function Home() {
     ]
   );
 
-  /* ─── room: send message to server ─── */
+  /* ─── room: send message to server (or AI partner) ─── */
 
   const sendRoom = useCallback(
     async ({
@@ -937,6 +958,44 @@ export default function Home() {
       if (isLoading || endedRef.current || !roomId) return;
       setIsLoading(true);
 
+      /* ── AI room: handle locally, no server call ── */
+      if (isAiRoomRef.current) {
+        addMsg("user", text);
+        awardDiamonds(text);
+        setTranslationPopup(null);
+        try {
+          const history = roomMsgsRef.current
+            .filter((m) => m.sender === "user" || m.sender === "friend")
+            .slice(-8)
+            .map((m) => ({
+              role: (m.sender === "user" ? "user" : "assistant") as "user" | "assistant",
+              content: m.content,
+            }));
+          history.push({ role: "user", content: text });
+          const res = await fetch("/api/ai-partner", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              messages: history,
+              partnerName: partnerRef.current?.name,
+              userName,
+            }),
+          });
+          const data = await res.json();
+          const reply: string = data.reply || "Haha, cool!";
+          addMsg("friend", reply);
+          playTTS(reply, "friend", () =>
+            setRoomDisplay({ sender: "friend", content: reply })
+          );
+        } catch {
+          /* silent */
+        } finally {
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      /* ── real server room ── */
       try {
         const res = await fetch("/api/room-chat", {
           method: "POST",
@@ -968,7 +1027,7 @@ export default function Home() {
         setIsLoading(false);
       }
     },
-    [isLoading, roomId, userId, userName, addMsg, awardDiamonds]
+    [isLoading, roomId, userId, userName, addMsg, awardDiamonds, playTTS]
   );
 
   /* ─── room: Chinese detection wrapper ─── */
@@ -1039,10 +1098,10 @@ export default function Home() {
     [sendCompanion, handleRoomMessage]
   );
 
-  /* ─── room: polling for partner messages ─── */
+  /* ─── room: polling for partner messages (skip for AI room) ─── */
 
   useEffect(() => {
-    if (mode !== "room" || !roomId) return;
+    if (mode !== "room" || !roomId || isAiRoom) return;
 
     const poll = async () => {
       try {
@@ -1094,7 +1153,7 @@ export default function Home() {
     return () => {
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     };
-  }, [mode, roomId, userId, addMsg, playAudioBase64, playTTS]);
+  }, [mode, roomId, userId, isAiRoom, addMsg, playAudioBase64, playTTS]);
 
   /* ─── voice recording ─── */
 
@@ -1272,6 +1331,8 @@ export default function Home() {
     setRoomDisplay(null);
     seenMsgIds.current.clear();
     lastPollTimeRef.current = 0;
+    setIsAiRoom(false);
+    isAiRoomRef.current = false;
 
     notifyMatchLeave(userId);
   }, [notifyMatchLeave, sessionDiamonds, userId]);
@@ -1290,13 +1351,55 @@ export default function Home() {
       seenMsgIds.current.clear();
       lastPollTimeRef.current = 0;
       setMode("room");
+
+      try {
+        const raw = localStorage.getItem("tino_friends_list");
+        const existing: { name: string; grade: number; lastChatAt: number }[] = raw ? JSON.parse(raw) : [];
+        const filtered = existing.filter((f) => f.name !== p.name || f.grade !== p.grade);
+        const updated = [{ name: p.name, grade: p.grade, lastChatAt: Date.now() }, ...filtered].slice(0, 20);
+        localStorage.setItem("tino_friends_list", JSON.stringify(updated));
+        setFriendsList(updated);
+      } catch { /* storage unavailable */ }
     },
     []
   );
 
+  /* ─── enter AI room after 10s timeout ─── */
+  const AI_PARTNER_NAMES = ["Mochi", "小A", "Kiki", "小星", "晴晴"];
+
+  const enterAiRoom = useCallback(() => {
+    const name = AI_PARTNER_NAMES[Math.floor(Math.random() * AI_PARTNER_NAMES.length)];
+    const aiPartner: RoomPartner = { userId: "ai_partner", name, grade: 0 };
+    setMatchingPhase("ai_found");
+    setTimeout(() => {
+      setMatchingPhase("waiting");
+      setIsAiRoom(true);
+      isAiRoomRef.current = true;
+      setRoomId("ai_room");
+      setPartner(aiPartner);
+      setRoomMsgs([]);
+      setTimeLeft(ROOM_DURATION);
+      setEnglishCount(0);
+      endedRef.current = false;
+      setActiveSpeaker(null);
+      setRoomDisplay(null);
+      setSessionDiamonds(0);
+      seenMsgIds.current.clear();
+      lastPollTimeRef.current = 0;
+      setMode("room");
+    }, 1800);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const startMatch = useCallback(async () => {
     unlockAudio();
     setMode("matching");
+
+    /* after 10s with no real match → arrange an AI partner */
+    matchTimeoutRef.current = setTimeout(() => {
+      if (matchPollRef.current) clearInterval(matchPollRef.current);
+      notifyMatchLeave(userId);
+      enterAiRoom();
+    }, 10000);
 
     try {
       const res = await fetch("/api/match", {
@@ -1312,6 +1415,7 @@ export default function Home() {
       const data = await res.json();
 
       if (data.matched && data.roomId && data.partner) {
+        clearTimeout(matchTimeoutRef.current);
         setTimeout(() => enterRoom(data.roomId, data.partner), 1500);
         return;
       }
@@ -1325,18 +1429,21 @@ export default function Home() {
           });
           const d = await r.json();
           if (d.matched && d.roomId && d.partner) {
+            clearTimeout(matchTimeoutRef.current);
             if (matchPollRef.current) clearInterval(matchPollRef.current);
             enterRoom(d.roomId, d.partner);
           }
         } catch { /* retry */ }
       }, 1500);
     } catch {
+      clearTimeout(matchTimeoutRef.current);
       setMode("companion");
     }
-  }, [unlockAudio, userId, userName, userGrade, enterRoom]);
+  }, [unlockAudio, userId, userName, userGrade, enterRoom, enterAiRoom, notifyMatchLeave]);
 
   const cancelMatch = useCallback(() => {
     if (matchPollRef.current) clearInterval(matchPollRef.current);
+    if (matchTimeoutRef.current) clearTimeout(matchTimeoutRef.current);
     notifyMatchLeave(userId);
     setMode("companion");
   }, [notifyMatchLeave, userId]);
@@ -1345,6 +1452,7 @@ export default function Home() {
   useEffect(() => {
     return () => {
       if (matchPollRef.current) clearInterval(matchPollRef.current);
+      if (matchTimeoutRef.current) clearTimeout(matchTimeoutRef.current);
     };
   }, []);
 
@@ -1572,28 +1680,39 @@ export default function Home() {
       ) : mode === "matching" ? (
         /* ── matching animation ── */
         <div className="h-full bg-gradient-to-b from-tino-orange/80 to-tino-blue/60 flex flex-col items-center justify-center gap-4 text-white text-center px-4">
-          <div className="match-spin">
-            <TinoAvatar size={64} expression="excited" />
-          </div>
-          <p className="text-lg font-bold animate-pulse-soft">
-            Let&apos;s find a friend!
-          </p>
-          <p className="text-sm opacity-80">正在寻找小伙伴...</p>
-          <div className="flex gap-2">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={i}
-                className="w-2.5 h-2.5 rounded-full bg-white animate-bounce"
-                style={{ animationDelay: `${i * 200}ms` }}
-              />
-            ))}
-          </div>
-          <button
-            onClick={cancelMatch}
-            className="mt-2 px-4 py-1.5 rounded-full bg-white/20 text-white text-xs font-bold active:bg-white/30 transition-colors"
-          >
-            取消匹配
-          </button>
+          {matchingPhase === "ai_found" ? (
+            /* AI partner found transition */
+            <>
+              <div className="text-5xl animate-bounce">🤖</div>
+              <p className="text-lg font-bold">AI 小伙伴来啦！</p>
+              <p className="text-sm opacity-80">正在为你安排...</p>
+            </>
+          ) : (
+            <>
+              <div className="match-spin">
+                <TinoAvatar size={64} expression="excited" />
+              </div>
+              <p className="text-lg font-bold animate-pulse-soft">
+                Let&apos;s find a friend!
+              </p>
+              <p className="text-sm opacity-80">正在寻找小伙伴...</p>
+              <div className="flex gap-2">
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="w-2.5 h-2.5 rounded-full bg-white animate-bounce"
+                    style={{ animationDelay: `${i * 200}ms` }}
+                  />
+                ))}
+              </div>
+              <button
+                onClick={cancelMatch}
+                className="mt-2 px-4 py-1.5 rounded-full bg-white/20 text-white text-xs font-bold active:bg-white/30 transition-colors"
+              >
+                取消匹配
+              </button>
+            </>
+          )}
         </div>
       ) : mode === "companion" ? (
         /* ── companion: VN-style — avatar bottom-left, speech bubble top-right ── */
@@ -1603,6 +1722,110 @@ export default function Home() {
               <div className="bg-black/60 text-white rounded-2xl px-5 py-3 text-lg font-bold">
                 🔊 {volume}
               </div>
+            </div>
+          )}
+
+          {/* Friends list button — top-left */}
+          <button
+            onClick={() => setShowFriendsList(true)}
+            className="absolute top-2 left-2 z-30 w-8 h-8 rounded-full bg-white/80 border border-[#ecc8d8] shadow-md flex items-center justify-center active:scale-90 transition-transform backdrop-blur-sm"
+            aria-label="查看好友列表"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#c4628a" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+            {friendsList.length > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#f08] text-white text-[8px] font-bold flex items-center justify-center leading-none">
+                {friendsList.length > 9 ? "9+" : friendsList.length}
+              </span>
+            )}
+          </button>
+
+          {/* Friends list — full-page overlay */}
+          {showFriendsList && (
+            <div className="absolute inset-0 z-40 flex flex-col bg-[#f5eef8]">
+              {/* header */}
+              <div className="flex items-center justify-between px-4 pt-5 pb-3 flex-shrink-0">
+                <button
+                  onClick={() => setShowFriendsList(false)}
+                  className="flex items-center gap-1.5 text-[#5b3f72] active:opacity-60 transition-opacity"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M19 12H5M12 5l-7 7 7 7"/>
+                  </svg>
+                  <span className="text-sm font-bold">我的好友</span>
+                </button>
+                {friendsList.length > 0 && (
+                  <span className="text-[11px] font-semibold text-[#9b72c8] bg-[#e8d8f8] px-2.5 py-1 rounded-full">
+                    {friendsList.length} 位好友
+                  </span>
+                )}
+              </div>
+
+              {/* list */}
+              {friendsList.length === 0 ? (
+                <div className="flex-1 flex flex-col items-center justify-center gap-3">
+                  <div className="text-5xl">🐾</div>
+                  <p className="text-sm font-bold text-[#c4a0b0]">还没有好友</p>
+                  <p className="text-[11px] text-[#d4b8c8] text-center px-8">
+                    和小伙伴匹配聊天后<br/>他们会出现在这里
+                  </p>
+                </div>
+              ) : (
+                <div className="flex-1 overflow-y-auto px-3 pb-4 flex flex-col gap-2">
+                  {friendsList.map((f, i) => {
+                    const AVATARS = ["🐰","🐯","🐻","🦊","🐼","🐨","🐸","🦁","🐮","🐷","🐧","🦆","🐺","🦋","🐙"];
+                    let hash = 0;
+                    for (let c = 0; c < f.name.length; c++) hash = (hash * 31 + f.name.charCodeAt(c)) & 0xffff;
+                    const emoji = AVATARS[hash % AVATARS.length];
+                    const AVATAR_COLORS = [
+                      "bg-[#e8d4f0]","bg-[#fde8c8]","bg-[#d4eef8]","bg-[#fde8e8]","bg-[#d8f0e4]",
+                    ];
+                    const avatarColor = AVATAR_COLORS[hash % AVATAR_COLORS.length];
+                    const minutesAgo = Math.floor((Date.now() - f.lastChatAt) / 60000);
+                    const timeLabel =
+                      minutesAgo < 1 ? "刚刚" :
+                      minutesAgo < 60 ? `${minutesAgo} 分钟前` :
+                      minutesAgo < 1440 ? `${Math.floor(minutesAgo / 60)} 小时前` :
+                      `${Math.floor(minutesAgo / 1440)} 天前`;
+                    const isRecent = minutesAgo < 10;
+                    return (
+                      <div
+                        key={i}
+                        className="flex items-center gap-3 bg-white rounded-2xl px-3 py-3 shadow-sm"
+                      >
+                        {/* avatar */}
+                        <div className="relative flex-shrink-0">
+                          <div className={`w-11 h-11 rounded-full ${avatarColor} flex items-center justify-center text-2xl`}>
+                            {emoji}
+                          </div>
+                          {isRecent && (
+                            <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-[#4cd964] border-2 border-white" />
+                          )}
+                        </div>
+                        {/* info */}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[13px] font-bold text-[#1e1218] truncate">{f.name}</p>
+                          <p className="text-[10px] text-[#b0a0b8] mt-0.5">{timeLabel} 聊过</p>
+                        </div>
+                        {/* call button */}
+                        <button
+                          onClick={() => { setShowFriendsList(false); startMatch(); }}
+                          className="flex items-center gap-1 bg-[#e8f8ee] text-[#3aad5e] text-[11px] font-bold px-2.5 py-1.5 rounded-xl active:bg-[#d4f0e0] transition-colors"
+                        >
+                          呼叫
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.71 3.47 2 2 0 0 1 3.69 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.91a16 16 0 0 0 6 6l1.01-1.01a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 21.73 16.92z"/>
+                          </svg>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
