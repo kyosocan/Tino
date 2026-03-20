@@ -125,81 +125,91 @@ export default function DeviceFrame({
   }, []);
 
   const btnBase =
-    "cursor-pointer shadow-md transition-colors bg-gradient-to-b from-[#C8C8C8] to-[#A8A8A8] active:from-[#909090] active:to-[#808080]";
-  const deviceWidth = 454;
-  const deviceHeight = 292;
+    "cursor-pointer transition-colors bg-gradient-to-b from-[#B8B8B8] to-[#989898] active:from-[#808080] active:to-[#707070]";
+
+  // Full-screen 2.8" phone: screen 200×267 (3:4), body 210×282, ultra-thin bezels
+  const deviceBodyWidth = 210;
+  const deviceBodyHeight = 282;
+  const leftBtnWidth = 10;
+  const rightBtnWidth = 26;
+  const totalWidth = deviceBodyWidth + leftBtnWidth + rightBtnWidth;
+  const totalHeight = deviceBodyHeight;
 
   return (
     <div
       className="device-scale-wrapper relative"
       style={
         {
-          "--device-w": `${deviceWidth}px`,
-          "--device-h": `${deviceHeight}px`,
+          "--device-w": `${totalWidth}px`,
+          "--device-h": `${totalHeight}px`,
         } as React.CSSProperties
       }
     >
-      {/* Flex layout: [left btns] [device body] [right btn] */}
-      <div className="flex items-center" style={{ width: deviceWidth, height: deviceHeight }}>
-        {/* ── Left side buttons ── */}
-        <div className="relative flex-shrink-0" style={{ width: 14, height: deviceHeight - 28 }}>
+      <div
+        className="flex items-stretch"
+        style={{ width: totalWidth, height: totalHeight }}
+      >
+        {/* ── Left buttons: power + volume ── */}
+        <div className="relative flex-shrink-0" style={{ width: leftBtnWidth, height: totalHeight }}>
           <div
-            role="button"
-            tabIndex={0}
-            className={`absolute ${btnBase} w-full h-[26px] rounded-l-[4px]`}
-            style={{ top: "14%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            role="button" tabIndex={0}
+            className={`absolute ${btnBase} w-full h-[18px] rounded-l-[3px]`}
+            style={{ top: "8%", left: 0, touchAction: "manipulation" }}
             {...powerHandlers}
           />
           <div
-            role="button"
-            tabIndex={0}
-            className={`absolute ${btnBase} w-full h-[34px] rounded-l-[4px]`}
-            style={{ top: "36%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            role="button" tabIndex={0}
+            className={`absolute ${btnBase} w-full h-[32px] rounded-l-[3px]`}
+            style={{ top: "38%", left: 0, touchAction: "manipulation" }}
             {...volUpHandlers}
           />
           <div
-            role="button"
-            tabIndex={0}
-            className={`absolute ${btnBase} w-full h-[34px] rounded-l-[4px]`}
-            style={{ top: "54%", left: 0, touchAction: "manipulation", WebkitTapHighlightColor: "rgba(0,0,0,0.1)" }}
+            role="button" tabIndex={0}
+            className={`absolute ${btnBase} w-full h-[32px] rounded-l-[3px]`}
+            style={{ top: "55%", left: 0, touchAction: "manipulation" }}
             {...volDownHandlers}
           />
         </div>
 
         {/* ── Device body ── */}
         <div
-          className="relative h-full flex-1 rounded-[28px] bg-gradient-to-b from-[#ECECEC] via-[#DCDCDC] to-[#CBCBCB]"
+          className="relative flex-1 rounded-[26px]"
           style={{
+            background: "linear-gradient(160deg, #2a2a2a 0%, #1a1a1a 50%, #111111 100%)",
             boxShadow:
-              "0 12px 48px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.6), inset 0 -1px 0 rgba(0,0,0,0.08)",
+              "0 16px 56px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.12)",
           }}
         >
+          {/* Front camera dot */}
           <div
-            className="absolute left-1/2 top-[10px] h-[4px] w-16 -translate-x-1/2 rounded-full bg-black/20"
+            className="absolute top-[1.8%] left-1/2 -translate-x-1/2 w-[5px] h-[5px] rounded-full bg-[#2a2a2a] border border-black/60"
+            style={{ boxShadow: "inset 0 0 2px rgba(0,0,0,0.8)" }}
             aria-hidden="true"
           />
-          {/* ── 2.8 寸横屏 ── */}
+
+          {/* ── Full-bleed screen with ultra-thin bezel ── */}
           <div
             className="absolute overflow-hidden bg-tino-cream"
             style={{
-              left: "9.5%",
-              right: "9.5%",
-              top: "10.5%",
-              bottom: "10.5%",
-              borderRadius: 16,
-              border: "2px solid #3A3A3A",
+              left: 5,
+              right: 5,
+              top: 5,
+              bottom: 5,
+              borderRadius: 22,
+              border: "1px solid rgba(0,0,0,0.5)",
+              boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.04)",
             }}
           >
             {children}
           </div>
         </div>
 
-        {/* ── Right: Voice button（长按不触发选中文字）── */}
+        {/* ── Right: Voice button ── */}
         <div
           className="relative flex-shrink-0 select-none"
           style={{
-            width: 34,
-            height: deviceHeight - 40,
+            width: rightBtnWidth,
+            height: totalHeight,
             WebkitUserSelect: "none",
             userSelect: "none",
             WebkitTouchCallout: "none",
@@ -208,17 +218,16 @@ export default function DeviceFrame({
           <div
             role="button"
             tabIndex={0}
-            className={`absolute w-full h-[92px] rounded-r-[8px] shadow-md cursor-pointer transition-all select-none ${
+            className={`absolute w-full h-[80px] rounded-r-[6px] cursor-pointer transition-all select-none ${
               isRecording
-                ? "bg-red-500 shadow-[0_0_16px_rgba(239,68,68,0.5)]"
-                : "bg-gradient-to-b from-[#C8C8C8] to-[#A8A8A8] active:from-[#909090] active:to-[#808080]"
+                ? "bg-red-500 shadow-[0_0_14px_rgba(239,68,68,0.6)] recording-pulse"
+                : btnBase
             }`}
             style={{
-              top: "50%",
+              top: "35%",
               right: 0,
               transform: "translateY(-50%)",
               touchAction: "none",
-              WebkitTapHighlightColor: "rgba(0,0,0,0.1)",
               WebkitUserSelect: "none",
               userSelect: "none",
               WebkitTouchCallout: "none",

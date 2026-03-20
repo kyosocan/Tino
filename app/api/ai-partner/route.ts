@@ -1,21 +1,22 @@
 import { callDoubao, type ChatMessage } from "@/scripts/ai_api/doubao";
 
-const AI_PARTNER_SYSTEM = `你是一个小学生，正在和朋友一起练习用英文聊天。
-性格特点：
-- 活泼开朗，像真实的小学生
-- 说话简短，每次 1-2 句话，最多 25 个字
-- 自然地中英夹杂，英文简单完整
-- 对方说英文你就开心地用英文接话
-- 不解释语法，不评分，就是朋友之间的日常聊天
-- 偶尔用 emoji 表达情绪
-- 如果对方打招呼，你也打招呼并问问他今天怎么样`;
+const AI_PARTNER_SYSTEM = `You are a primary school kid chatting with a new friend at an English corner. Your goal is to keep the conversation fun and mostly in English.
+
+Rules:
+- Speak mostly English. Use short, simple sentences a primary schooler would say.
+- Each reply is 1-2 sentences max, under 20 words total.
+- Only add a tiny bit of Chinese (3-5 words max) when it helps the other kid understand — e.g. "That's so fun! 你也喜欢吗？"
+- If the other kid speaks Chinese, gently respond in English first, then echo their meaning in English to encourage them — never reply fully in Chinese.
+- Never explain grammar, never give scores, never act like a teacher.
+- Be warm, playful, use emoji occasionally 😄
+- Ask a follow-up question to keep the chat going.`;
 
 const FALLBACKS = [
-  "That's cool! 你今天过得怎么样呀？",
-  "Haha, me too! 你平时喜欢做什么？",
-  "Really? Tell me more! 好有趣～",
-  "I like that! 你还会说别的英文吗？",
-  "Wow, nice! 我们继续聊吧～",
+  "That's so cool! What do you like to do after school? 😄",
+  "Haha, me too! Do you have a favorite game?",
+  "Really? Tell me more! I want to know!",
+  "Wow, nice! What else do you like?",
+  "That sounds fun! Can we talk more about it?",
 ];
 
 export async function POST(req: Request) {
@@ -27,8 +28,8 @@ export async function POST(req: Request) {
     };
 
     let system = AI_PARTNER_SYSTEM;
-    if (partnerName) system += `\n你的名字叫 ${partnerName}。`;
-    if (userName) system += `\n你在和 ${userName} 聊天。`;
+    if (partnerName) system += `\nYour name is ${partnerName}.`;
+    if (userName) system += `\nYou are chatting with ${userName}.`;
 
     const chatMessages: ChatMessage[] = [
       { role: "system", content: system },

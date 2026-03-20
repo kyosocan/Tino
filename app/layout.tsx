@@ -22,8 +22,8 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN">
-      <body className="font-sans bg-[#1a1a2e] antialiased">
-        <div className="h-dvh w-full flex items-center justify-center">
+      <body className="font-sans bg-[#e8e4de] antialiased">
+        <div className="h-dvh w-full flex items-center justify-center bg-[#e8e4de]">
           {children}
         </div>
       </body>

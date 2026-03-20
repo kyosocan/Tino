@@ -169,21 +169,111 @@ body {
   animation: diamondFloat 1.2s ease-out forwards;
 }
 
-/* ── Device scaling ── */
+/* ── Drift bottle animations ── */
+@keyframes bottleFloat {
+  0%, 100% { transform: translateY(0) rotate(-10deg) scale(1); }
+  30% { transform: translateY(-10px) rotate(5deg) scale(1.03); }
+  60% { transform: translateY(-4px) rotate(10deg) scale(1.01); }
+}
+.bottle-float {
+  animation: bottleFloat 3.5s ease-in-out infinite;
+}
+
+@keyframes bottleThrow {
+  0% { transform: translateX(0) translateY(0) rotate(0deg) scale(1); opacity: 1; }
+  60% { transform: translateX(60px) translateY(-80px) rotate(180deg) scale(0.8); opacity: 0.8; }
+  100% { transform: translateX(90px) translateY(30px) rotate(280deg) scale(0.3); opacity: 0; }
+}
+.bottle-throw {
+  animation: bottleThrow 1.2s ease-in forwards;
+}
+
+@keyframes bottleRise {
+  0% { transform: translateY(60px) scale(0.5); opacity: 0; }
+  60% { transform: translateY(-10px) scale(1.1); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+.bottle-rise {
+  animation: bottleRise 0.8s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+@keyframes waveAnim {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.wave-anim {
+  animation: waveAnim 4s linear infinite;
+}
+
+@keyframes popIn {
+  0% { transform: scale(0.6); opacity: 0; }
+  70% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.pop-in {
+  animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+/* ── Kids: star twinkle ── */
+@keyframes starTwinkle {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.5); }
+}
+.star-twinkle {
+  animation: starTwinkle var(--twinkle-dur, 2.5s) ease-in-out infinite;
+  animation-delay: var(--twinkle-delay, 0s);
+}
+
+/* ── Kids: bubble float ── */
+@keyframes bubbleUp {
+  0% { transform: translateY(0) scale(1); opacity: 0.5; }
+  50% { opacity: 0.7; }
+  100% { transform: translateY(-120px) scale(0.4); opacity: 0; }
+}
+.bubble-up {
+  animation: bubbleUp var(--bubble-dur, 5s) ease-in infinite;
+  animation-delay: var(--bubble-delay, 0s);
+}
+
+/* ── Kids: button press 3D ── */
+@keyframes btnWiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-1.5deg); }
+  75% { transform: rotate(1.5deg); }
+}
+.btn-kid {
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.btn-kid:active {
+  transform: translateY(4px) scale(0.97) !important;
+  box-shadow: 0 1px 0 rgba(0,30,60,0.3) !important;
+}
+
+/* ── Kids: celebration sparkle ── */
+@keyframes sparkle {
+  0% { transform: scale(0) rotate(0deg); opacity: 1; }
+  50% { transform: scale(1.2) rotate(180deg); opacity: 1; }
+  100% { transform: scale(0) rotate(360deg); opacity: 0; }
+}
+.sparkle-anim {
+  animation: sparkle 0.7s ease-out forwards;
+}
+
+/* ── Device scaling (full-screen portrait 2.8") ── */
 .device-scale-wrapper {
-  --device-w: 454px;
-  --device-h: 292px;
+  --device-w: 246px;
+  --device-h: 282px;
   width: var(--device-w);
   height: var(--device-h);
   transform-origin: center center;
 }
 
-@media (max-height: 340px) {
+@media (max-height: 330px) {
   .device-scale-wrapper {
     transform: scale(calc(94dvh / var(--device-h)));
   }
 }
-@media (max-width: 500px) {
+@media (max-width: 290px) {
   .device-scale-wrapper {
     transform: scale(calc(96vw / var(--device-w)));
   }

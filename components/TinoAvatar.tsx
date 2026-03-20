@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import tinoAvatar from "@/scripts/ai_api/头像 tino.png";
+import tinoAvatar from "@/scripts/ai_api/111.png";
 
 export default function TinoAvatar({
   size = 48,

@@ -5,9 +5,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import DeviceFrame from "@/components/DeviceFrame";
 import TinoAvatar from "@/components/TinoAvatar";
 import tinoPortrait from "@/scripts/ai_api/人物像.png";
-import avatarUser from "@/scripts/ai_api/头像  user.png";
-import avatarBuddy from "@/scripts/ai_api/头像 1.png";
-import avatarFriend from "@/scripts/ai_api/头像 2.png";
+import portraitUser from "@/scripts/ai_api/User1.png";
+import portraitPartner from "@/scripts/ai_api/partner2.png";
+import portraitBuddy from "@/scripts/ai_api/partner1.png";
 import type {
   Message,
   AppMode,
@@ -501,13 +501,6 @@ export default function Home() {
   useEffect(() => { roomMsgsRef.current = roomMsgs; }, [roomMsgs]);
 
   /* translation popup */
-  const [translationPopup, setTranslationPopup] = useState<{
-    chinese: string;
-    english: string;
-    words: { word: string; phonetic: string }[];
-    voiceGuide: string;
-    loading: boolean;
-  } | null>(null);
 
   /* exit confirmation */
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -525,6 +518,45 @@ export default function Home() {
   const [showAddFriend, setShowAddFriend] = useState(false);
   type CallingFriend = { name: string; emoji: string; avatarColor: string };
   const [callingFriend, setCallingFriend] = useState<CallingFriend | null>(null);
+
+  /* drift bottle */
+  type BottleSubState =
+    | "menu"
+    | "throw_input"
+    | "throwing"
+    | "throw_done"
+    | "picking"
+    | "picked"
+    | "replying"
+    | "reply_done"
+    | "inbox";
+  type PickedBottleData = {
+    id: string;
+    senderName: string;
+    senderGrade: number;
+    content: string;
+    audioBase64?: string;
+    mimeType?: string;
+  };
+  type InboxBottleData = {
+    id: string;
+    content: string;
+    reply: { content: string; repliedByName: string; repliedAt: number };
+  };
+  const [bottleSubState, setBottleSubState] =
+    useState<BottleSubState>("menu");
+  const bottleSubStateRef = useRef<BottleSubState>("menu");
+  useEffect(() => { bottleSubStateRef.current = bottleSubState; }, [bottleSubState]);
+  const [bottleInput, setBottleInput] = useState("");
+  const [bottleAudioBase64, setBottleAudioBase64] = useState("");
+  const [bottleAudioMime, setBottleAudioMime] = useState("");
+  const [bottleReplyInput, setBottleReplyInput] = useState("");
+  const [pickedBottle, setPickedBottle] = useState<PickedBottleData | null>(
+    null
+  );
+  const [bottleInbox, setBottleInbox] = useState<InboxBottleData[]>([]);
+  const [bottleLoading, setBottleLoading] = useState(false);
+  const [bottleInboxUnread, setBottleInboxUnread] = useState(0);
 
   /* diamonds / frames */
   const [diamonds, setDiamonds] = useState(0);
@@ -1104,7 +1136,6 @@ export default function Home() {
       if (isAiRoomRef.current) {
         addMsg("user", text);
         awardDiamonds(text);
-        setTranslationPopup(null);
         try {
           const history = roomMsgsRef.current
             .filter((m) => m.sender === "user" || m.sender === "friend")
@@ -1159,7 +1190,6 @@ export default function Home() {
         seenMsgIds.current.add(data.messageId);
         addMsg("user", text);
         awardDiamonds(text);
-        setTranslationPopup(null);
       } catch {
         addMsg("system", "消息发送失败，请重试");
       } finally {
@@ -1187,7 +1217,8 @@ export default function Home() {
           });
           return;
         }
-        setTranslationPopup({ chinese: text, english: "", words: [], voiceGuide: "", loading: true });
+        /* Show buddy immediately while fetching */
+        setRoomDisplay({ sender: "tino", content: "..." });
         try {
           const res = await fetch("/api/translate", {
             method: "POST",
@@ -1196,12 +1227,10 @@ export default function Home() {
           });
           const data = await res.json();
           const english = (data.english || "").trim();
-          const words: { word: string; phonetic: string }[] = data.words || [];
-          const voiceGuide = (data.voiceGuide || "").trim();
-          setTranslationPopup({ chinese: text, english, words, voiceGuide, loading: false });
-          if (voiceGuide) playTTS(voiceGuide, "tino");
+          const voiceGuide = (data.voiceGuide || english).trim();
+          if (voiceGuide) speakRoomSentences("tino", voiceGuide);
         } catch {
-          setTranslationPopup({ chinese: text, english: "", words: [], voiceGuide: "", loading: false });
+          setRoomDisplay(null);
         }
         return;
       }
@@ -1353,12 +1382,11 @@ export default function Home() {
             if (modeRef.current === "companion") setDisplayText(s);
           });
         }
-        /* After step 1 (teach greeting): invite the child to read along */
+        /* After step 1: show the sentence in the subtitle area for follow-along */
         if (i === 1) {
-          playTTS("来，念一遍吧～", "tino", () => {
+          playTTS("Nice to meet you!", "tino", () => {
             if (modeRef.current === "companion") {
-              setDisplayText("来，念一遍吧～");
-              setShowOnboardingReadingCard(true);
+              setDisplayText("Nice to meet you! 🎤\n按住右侧按键跟读一遍");
             }
           });
         }
@@ -1389,7 +1417,16 @@ export default function Home() {
     /* header notice */
     timers.push(setTimeout(() => {
       if (modeRef.current !== "companion") return;
-      const intro = "刚才跟新朋友聊得怎么样？我觉得超好玩的 😄 跟你说说我发现的事～";
+      const INTROS = [
+        "哇刚才聊得好开心！我发现了个很厉害的事想告诉你～",
+        "刚才好好玩哦！我悄悄记了点东西，跟你说一下 😄",
+        "刚才那局我印象好深！跟你聊聊我发现的～",
+        "嘿你知道吗，刚才你有一个地方特别厉害！",
+        "我刚才一直在观察你哈哈，发现了一个秘密想跟你分享～",
+        "刚才玩得真不错！我有个小发现要告诉你 🎉",
+        "聊完啦！我偷偷给你做了个小笔记，你要看吗？",
+      ];
+      const intro = INTROS[Math.floor(Math.random() * INTROS.length)];
       setCompanionMsgs((prev) => [
         ...prev,
         { id: `db_intro`, sender: "tino", content: intro, timestamp: Date.now() },
@@ -1538,6 +1575,18 @@ export default function Home() {
           });
           const data = await res.json();
           const text = (data.text || "").trim();
+          /* bottle mode: fill input with ASR result + keep audio for throw */
+          if (modeRef.current === "bottle") {
+            const bs = bottleSubStateRef.current;
+            if (bs === "throw_input") {
+              setBottleInput(text || "");
+              setBottleAudioBase64(b64);
+              setBottleAudioMime(actualMime);
+            } else if (bs === "replying") {
+              setBottleReplyInput(text || "");
+            }
+            return;
+          }
           if (modeRef.current === "room") {
             await handleRoomMessage(text || "Voice message", {
               audioBase64: b64,
@@ -1974,6 +2023,137 @@ export default function Home() {
     el.style.animation = `lyricsScroll ${ms}ms ease-in-out 1.5s forwards`;
   }, [roomLyricsText, mode]);
 
+  /* ─── drift bottle handlers ─── */
+
+  const openBottleMode = useCallback(async () => {
+    setBottleSubState("menu");
+    setBottleInput("");
+    setBottleReplyInput("");
+    setPickedBottle(null);
+    setMode("bottle");
+    if (!userId) return;
+    try {
+      const res = await fetch("/api/drift-bottle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "inbox", userId }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setBottleInbox(data.bottles);
+        setBottleInboxUnread(data.bottles.length);
+      }
+    } catch { /* ignore */ }
+  }, [userId]);
+
+  const handleThrowBottle = useCallback(async () => {
+    if (!bottleInput.trim() || bottleLoading) return;
+    setBottleLoading(true);
+    setBottleSubState("throwing");
+    await new Promise((r) => setTimeout(r, 1200));
+    try {
+      await fetch("/api/drift-bottle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "throw",
+          userId,
+          senderName: userName,
+          senderGrade: userGrade,
+          content: bottleInput.trim(),
+          audioBase64: bottleAudioBase64 || undefined,
+          mimeType: bottleAudioMime || undefined,
+        }),
+      });
+      setBottleSubState("throw_done");
+      setBottleInput("");
+      setBottleAudioBase64("");
+      setBottleAudioMime("");
+    } catch {
+      setBottleSubState("throw_input");
+    } finally {
+      setBottleLoading(false);
+    }
+  }, [bottleInput, bottleAudioBase64, bottleAudioMime, bottleLoading, userId, userName, userGrade]);
+
+  const handlePickBottle = useCallback(async () => {
+    if (bottleLoading) return;
+    setBottleLoading(true);
+    setBottleSubState("picking");
+    await new Promise((r) => setTimeout(r, 1800));
+    try {
+      const res = await fetch("/api/drift-bottle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "pick", userId }),
+      });
+      const data = await res.json();
+      if (data.ok && data.bottle) {
+        setPickedBottle({
+          id: data.bottle.id,
+          senderName: data.bottle.senderName,
+          senderGrade: data.bottle.senderGrade,
+          content: data.bottle.content,
+          audioBase64: data.bottle.audioBase64 || undefined,
+          mimeType: data.bottle.mimeType || undefined,
+        });
+      } else {
+        setPickedBottle({
+          id: "",
+          senderName: "",
+          senderGrade: 0,
+          content: data.message || "海里暂时没有瓶子",
+        });
+      }
+      setBottleSubState("picked");
+    } catch {
+      setBottleSubState("menu");
+    } finally {
+      setBottleLoading(false);
+    }
+  }, [bottleLoading, userId]);
+
+  const handleReplyBottle = useCallback(async () => {
+    if (!bottleReplyInput.trim() || !pickedBottle?.id || bottleLoading) return;
+    setBottleLoading(true);
+    try {
+      await fetch("/api/drift-bottle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "reply",
+          bottleId: pickedBottle.id,
+          userId,
+          userName,
+          content: bottleReplyInput.trim(),
+        }),
+      });
+      setBottleSubState("reply_done");
+      setBottleReplyInput("");
+    } catch { /* ignore */ } finally {
+      setBottleLoading(false);
+    }
+  }, [bottleReplyInput, pickedBottle, bottleLoading, userId, userName]);
+
+  const fetchBottleInbox = useCallback(async () => {
+    if (!userId) return;
+    setBottleLoading(true);
+    try {
+      const res = await fetch("/api/drift-bottle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "inbox", userId }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setBottleInbox(data.bottles);
+        setBottleInboxUnread(0);
+      }
+    } catch { /* ignore */ } finally {
+      setBottleLoading(false);
+    }
+  }, [userId]);
+
   /* ─── render ─── */
 
   return (
@@ -2061,8 +2241,10 @@ export default function Home() {
           )}
         </div>
       ) : mode === "companion" ? (
-        /* ── companion: VN-style — avatar bottom-left, speech bubble top-right ── */
-        <div className="relative h-full min-h-0 overflow-hidden bg-gradient-to-br from-[#fde8f0] via-[#fff3f7] to-[#f4eeff]">
+        /* ── companion: portrait — character center, chat overlay bottom ── */
+        <div className="relative h-full min-h-0 overflow-hidden bg-gradient-to-b from-[#fce8f4] via-[#fff0f8] to-[#ede8ff]">
+
+          {/* Volume toast */}
           {showVolume && (
             <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
               <div className="bg-black/60 text-white rounded-2xl px-5 py-3 text-lg font-bold">
@@ -2071,29 +2253,9 @@ export default function Home() {
             </div>
           )}
 
-          {/* Friends list button — top-left */}
-          <button
-            onClick={() => setShowFriendsList(true)}
-            className="absolute top-2 left-2 z-30 w-8 h-8 rounded-full bg-white/80 border border-[#ecc8d8] shadow-md flex items-center justify-center active:scale-90 transition-transform backdrop-blur-sm"
-            aria-label="查看好友列表"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#c4628a" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-              <circle cx="9" cy="7" r="4"/>
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-            </svg>
-            {friendsList.length > 0 && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#f08] text-white text-[8px] font-bold flex items-center justify-center leading-none">
-                {friendsList.length > 9 ? "9+" : friendsList.length}
-              </span>
-            )}
-          </button>
-
-          {/* Friends list — full-page overlay */}
+          {/* Friends list overlay */}
           {showFriendsList && (
             <div className="absolute inset-0 z-40 flex flex-col bg-[#f5eef8]">
-              {/* header */}
               <div className="flex items-center justify-between px-4 pt-5 pb-3 flex-shrink-0">
                 <button
                   onClick={() => setShowFriendsList(false)}
@@ -2110,8 +2272,6 @@ export default function Home() {
                   </span>
                 )}
               </div>
-
-              {/* list */}
               {friendsList.length === 0 ? (
                 <div className="flex-1 flex flex-col items-center justify-center gap-3">
                   <div className="text-5xl">🐾</div>
@@ -2127,9 +2287,7 @@ export default function Home() {
                     let hash = 0;
                     for (let c = 0; c < f.name.length; c++) hash = (hash * 31 + f.name.charCodeAt(c)) & 0xffff;
                     const emoji = AVATARS[hash % AVATARS.length];
-                    const AVATAR_COLORS = [
-                      "bg-[#e8d4f0]","bg-[#fde8c8]","bg-[#d4eef8]","bg-[#fde8e8]","bg-[#d8f0e4]",
-                    ];
+                    const AVATAR_COLORS = ["bg-[#e8d4f0]","bg-[#fde8c8]","bg-[#d4eef8]","bg-[#fde8e8]","bg-[#d8f0e4]"];
                     const avatarColor = AVATAR_COLORS[hash % AVATAR_COLORS.length];
                     const minutesAgo = Math.floor((Date.now() - f.lastChatAt) / 60000);
                     const timeLabel =
@@ -2139,30 +2297,17 @@ export default function Home() {
                       `${Math.floor(minutesAgo / 1440)} 天前`;
                     const isRecent = minutesAgo < 10;
                     return (
-                      <div
-                        key={i}
-                        className="flex items-center gap-3 bg-white rounded-2xl px-3 py-3 shadow-sm"
-                      >
-                        {/* avatar */}
+                      <div key={i} className="flex items-center gap-3 bg-white rounded-2xl px-3 py-3 shadow-sm">
                         <div className="relative flex-shrink-0">
-                          <div className={`w-11 h-11 rounded-full ${avatarColor} flex items-center justify-center text-2xl`}>
-                            {emoji}
-                          </div>
-                          {isRecent && (
-                            <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-[#4cd964] border-2 border-white" />
-                          )}
+                          <div className={`w-11 h-11 rounded-full ${avatarColor} flex items-center justify-center text-2xl`}>{emoji}</div>
+                          {isRecent && <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-[#4cd964] border-2 border-white" />}
                         </div>
-                        {/* info */}
                         <div className="flex-1 min-w-0">
                           <p className="text-[13px] font-bold text-[#1e1218] truncate">{f.name}</p>
                           <p className="text-[10px] text-[#b0a0b8] mt-0.5">{timeLabel} 聊过</p>
                         </div>
-                        {/* call button */}
                         <button
-                          onClick={() => {
-                            setShowFriendsList(false);
-                            setCallingFriend({ name: f.name, emoji, avatarColor });
-                          }}
+                          onClick={() => { setShowFriendsList(false); setCallingFriend({ name: f.name, emoji, avatarColor }); }}
                           className="flex items-center gap-1 bg-[#e8f8ee] text-[#3aad5e] text-[11px] font-bold px-2.5 py-1.5 rounded-xl active:bg-[#d4f0e0] transition-colors"
                         >
                           呼叫
@@ -2181,16 +2326,13 @@ export default function Home() {
           {/* Calling overlay */}
           {callingFriend && (
             <div className="absolute inset-0 z-50 bg-[#fdf0f8] flex flex-col items-center justify-center gap-5">
-              {/* avatar */}
               <div className={`w-20 h-20 rounded-full ${callingFriend.avatarColor} flex items-center justify-center text-4xl shadow-md`}>
                 {callingFriend.emoji}
               </div>
-              {/* name */}
               <div className="text-center">
                 <p className="text-[17px] font-black text-[#1e1218]">{callingFriend.name}</p>
                 <p className="text-[12px] text-[#b0a0b8] mt-1 animate-pulse">正在呼叫... Calling...</p>
               </div>
-              {/* cancel */}
               <button
                 onClick={() => setCallingFriend(null)}
                 className="w-12 h-12 rounded-full bg-[#ff4d4d] flex items-center justify-center shadow-lg active:scale-90 transition-transform"
@@ -2202,61 +2344,13 @@ export default function Home() {
             </div>
           )}
 
-          {/* Speech bubble */}
-          <div
-            className="absolute"
-            style={{ left: 128, right: 10, top: 8, bottom: "26%" }}
-          >
-            {/* bubble body */}
-            <div className="relative z-10 h-full rounded-[20px] border-2 border-[#ecc8d8] bg-[#fff6f9] px-4 py-3 shadow-[0_8px_24px_rgba(164,115,136,0.14)] flex flex-col">
-              <p className="flex-shrink-0 mb-1.5 text-[9px] font-semibold tracking-[0.26em] text-[#c4a0b0]">
-                T I N O
-              </p>
-              <div
-                ref={companionBoxRef}
-                className="flex-1 min-h-0 overflow-y-auto"
-              >
-                <p className="whitespace-pre-wrap break-words text-[17px] font-black leading-[1.5] text-[#1e1218]">
-                  {displayText}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Status hint — below bubble, vertical layout */}
-          <div
-            className="absolute flex flex-col items-center justify-center gap-1.5"
-            style={{ left: 128, right: 10, bottom: 0, height: "24%" }}
-          >
-            <span className={`text-[12px] font-bold ${companionStatusAccent}`}>
-              {statusText}
-            </span>
-            {companionStatusHint && (
-              <span className="text-[10px] text-[#c4a0b0]">
-                {companionStatusHint}
-              </span>
-            )}
-          </div>
-
-          {/* 摇一摇 button — top-left, beside friends button */}
-          <button
-            onClick={startMatch}
-            className="absolute top-2 left-12 z-30 h-8 px-2.5 rounded-full bg-white/80 border border-[#ecc8d8] shadow-md text-[#c4628a] text-[9px] font-bold flex items-center gap-1 active:bg-[#ecc8d8] transition-colors backdrop-blur-sm"
-          >
-            🫶 摇一摇
-          </button>
-
-          {/* Onboarding reading card — centered modal */}
+          {/* Onboarding reading card */}
           {showOnboardingReadingCard && (
             <div
-              className="absolute inset-0 z-30 bg-black/30 flex items-center justify-center px-5"
+              className="absolute inset-0 z-30 bg-black/30 flex items-center justify-center px-4"
               onClick={dismissOnboardingReadingCard}
             >
-              <div
-                className="bg-white rounded-3xl w-full shadow-2xl overflow-hidden py-5"
-                onClick={(e) => e.stopPropagation()}
-              >
-                {/* word phonetics chips */}
+              <div className="bg-white rounded-3xl w-full shadow-2xl overflow-hidden py-5" onClick={(e) => e.stopPropagation()}>
                 <div className="px-4 flex flex-wrap gap-2 justify-center">
                   {[
                     { word: "Nice", phonetic: "/naɪs/" },
@@ -2274,21 +2368,15 @@ export default function Home() {
                     </button>
                   ))}
                 </div>
-
-                {/* full sentence — subtle */}
                 <div className="mx-4 mt-3 flex items-center gap-2 bg-[#f8f2ff] rounded-xl px-3 py-2">
                   <p className="flex-1 text-[13px] font-bold text-[#6a4a8a]">Nice to meet you!</p>
                   <button
                     onClick={() => playTTS("Nice to meet you!", "tino")}
-                    className="flex-shrink-0 w-7 h-7 rounded-full bg-[#7c3fa8]/12 text-[#7c3fa8] flex items-center justify-center active:bg-[#7c3fa8]/25 transition-colors"
+                    className="flex-shrink-0 w-7 h-7 rounded-full bg-[#7c3fa8]/10 text-[#7c3fa8] flex items-center justify-center active:bg-[#7c3fa8]/25 transition-colors"
                   >
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-                      <polygon points="5,3 19,12 5,21" />
-                    </svg>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21" /></svg>
                   </button>
                 </div>
-
-                {/* recording hint */}
                 <div className="mt-3 flex justify-center">
                   <p className="text-[12px] font-bold text-green-500">按住右侧按键跟读一遍</p>
                 </div>
@@ -2296,20 +2384,87 @@ export default function Home() {
             </div>
           )}
 
-          {/* Avatar — bottom-left corner */}
-          <div
-            className="absolute bottom-0 z-20"
-            style={{ width: 152, height: "100%", left: -8 }}
-          >
+          {/* Character — centered, fills screen */}
+          <div className="absolute inset-0">
             <Image
               src={tinoPortrait}
               alt="Tino"
               fill
-              sizes="112px"
-              className="object-contain object-bottom"
-              style={{ mixBlendMode: "screen" }}
+              sizes="192px"
+              className="object-contain"
+              style={{ mixBlendMode: "multiply", objectPosition: "center 25%" }}
               priority
             />
+          </div>
+
+          {/* Bottom gradient fade for chat overlay readability */}
+          <div
+            className="absolute bottom-0 inset-x-0 pointer-events-none"
+            style={{ height: "42%", background: "linear-gradient(to top, rgba(244,238,255,0.88) 30%, rgba(244,238,255,0.5) 65%, transparent)" }}
+          />
+
+          {/* TOP HUD: friends (left) | bottle + shake (right) */}
+          <div className="absolute top-2 inset-x-2 z-20 flex items-center justify-between">
+            <button
+              onClick={() => setShowFriendsList(true)}
+              className="w-8 h-8 rounded-full bg-white/85 border border-[#ecc8d8] shadow-md flex items-center justify-center active:scale-90 transition-transform backdrop-blur-sm relative"
+              aria-label="查看好友列表"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#c4628a" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                <circle cx="9" cy="7" r="4"/>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+              {friendsList.length > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#f08] text-white text-[8px] font-bold flex items-center justify-center leading-none">
+                  {friendsList.length > 9 ? "9+" : friendsList.length}
+                </span>
+              )}
+            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={openBottleMode}
+                className="relative h-7 px-2 rounded-full bg-white/85 border border-[#b8d8ee] shadow-md text-[9px] font-bold flex items-center gap-0.5 active:bg-[#c8e8f8] transition-colors backdrop-blur-sm text-[#2a7aaa]"
+                aria-label="漂流瓶"
+              >
+                🫙 漂流瓶
+                {bottleInboxUnread > 0 && (
+                  <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[7px] font-bold flex items-center justify-center leading-none">
+                    {bottleInboxUnread}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={startMatch}
+                className="h-7 px-2.5 rounded-full bg-white/85 border border-[#ecc8d8] shadow-md text-[#c4628a] text-[9px] font-bold flex items-center gap-1 active:bg-[#ecc8d8] transition-colors backdrop-blur-sm"
+              >
+                🫶 摇一摇
+              </button>
+            </div>
+          </div>
+
+          {/* BOTTOM chat overlay */}
+          <div className="absolute bottom-0 inset-x-0 z-10 px-2.5 pb-2.5">
+            {/* Speech bubble */}
+            <div className="bg-white/50 backdrop-blur-md rounded-[18px] border border-white/60 shadow-lg px-3.5 py-2.5">
+              <p className="text-[8px] font-bold tracking-[0.22em] text-[#c4a0b0] mb-1">T I N O</p>
+              <div
+                ref={companionBoxRef}
+                className="max-h-[88px] overflow-y-auto"
+              >
+                <p className="whitespace-pre-wrap break-words text-[14px] font-black leading-snug text-[#1e1218]">
+                  {displayText}
+                </p>
+              </div>
+            </div>
+            {/* Status row */}
+            <div className="flex items-center justify-center gap-2 mt-1.5 min-h-[20px]">
+              <span className={`text-[11px] font-bold ${companionStatusAccent}`}>{statusText}</span>
+              {companionStatusHint && (
+                <span className="text-[9px] text-[#c4a0b0]">{companionStatusHint}</span>
+              )}
+            </div>
           </div>
         </div>
       ) : mode === "shop" ? (
@@ -2372,144 +2527,580 @@ export default function Home() {
             </div>
           </div>
         </div>
+      ) : mode === "bottle" ? (
+        /* ── drift bottle ── */
+        <div
+          className="flex flex-col h-full min-h-0 relative overflow-hidden select-none"
+          style={{
+            background:
+              "linear-gradient(180deg, #0f2d5e 0%, #1768a8 30%, #20a4d4 60%, #5fd8f5 85%, #8ae8ff 100%)",
+          }}
+        >
+
+          {/* Stars — twinkling for kids */}
+          {[...Array(18)].map((_, i) => (
+            <div
+              key={i}
+              className="absolute rounded-full bg-white star-twinkle"
+              style={{
+                width: i % 3 === 0 ? 3 : 2,
+                height: i % 3 === 0 ? 3 : 2,
+                top: `${2 + (i * 7) % 28}%`,
+                left: `${4 + (i * 14) % 92}%`,
+                "--twinkle-dur": `${2 + (i % 4) * 0.8}s`,
+                "--twinkle-delay": `${(i * 0.4) % 3}s`,
+              } as React.CSSProperties}
+            />
+          ))}
+
+          {/* Floating bubbles */}
+          {[...Array(6)].map((_, i) => (
+            <div
+              key={`b${i}`}
+              className="absolute rounded-full bubble-up pointer-events-none"
+              style={{
+                width: 4 + (i % 3) * 3,
+                height: 4 + (i % 3) * 3,
+                bottom: "10%",
+                left: `${10 + i * 15}%`,
+                background: "radial-gradient(circle at 30% 30%, rgba(255,255,255,0.5), rgba(255,255,255,0.15))",
+                "--bubble-dur": `${4 + (i % 3) * 2}s`,
+                "--bubble-delay": `${i * 1.2}s`,
+              } as React.CSSProperties}
+            />
+          ))}
+
+          {/* Moon — bigger & warmer */}
+          <div
+            className="absolute top-2 right-3 w-9 h-9 rounded-full"
+            style={{
+              background: "radial-gradient(circle at 40% 40%, #fffbe6, #ffe49c)",
+              boxShadow: "0 0 20px rgba(255,240,180,0.7), 0 0 60px rgba(255,210,120,0.3)",
+            }}
+            aria-hidden
+          />
+
+          {/* Header */}
+          <div className="px-2 pt-1 flex-shrink-0 relative z-10">
+            <button
+              type="button"
+              onClick={() => setMode("companion")}
+              className="inline-flex items-center gap-1 text-[12px] font-bold text-white/90 pl-2 pr-3 py-2 min-h-[44px] rounded-2xl bg-white/10 active:bg-white/25 transition-colors"
+              style={{ backdropFilter: "blur(4px)" }}
+            >
+              <span className="text-[14px] leading-none" aria-hidden>‹</span>
+              返回
+            </button>
+          </div>
+
+          {/* Content */}
+          <div
+            className={`flex-1 relative z-10 flex flex-col min-h-0 px-4 ${
+              bottleSubState === "menu"
+                ? "pb-[52px]"
+                : bottleSubState === "inbox"
+                  ? "pb-[52px] pt-1 items-stretch"
+                  : "items-center justify-center pb-10"
+            }`}
+          >
+
+            {/* MENU — kids-friendly: big colorful buttons */}
+            {bottleSubState === "menu" && (
+              <div className="flex-1 flex flex-col min-h-0 w-full items-center px-1">
+                <div className="flex-1 min-h-0" />
+
+                <div className="flex-shrink-0 flex flex-col items-stretch w-full max-w-[220px] gap-3 pb-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBottleSubState("throw_input");
+                      setBottleInput("");
+                      setBottleAudioBase64("");
+                      setBottleAudioMime("");
+                    }}
+                    className="btn-kid w-full min-h-[58px] rounded-[24px] flex items-center justify-center gap-3 px-4"
+                    style={{
+                      background: "linear-gradient(135deg, #ff9a56 0%, #ff6b35 100%)",
+                      boxShadow: "0 5px 0 #c44e1a, 0 8px 16px rgba(255,100,40,0.3)",
+                    }}
+                  >
+                    <span className="text-[28px] leading-none" aria-hidden>🫙</span>
+                    <span className="text-[16px] font-extrabold text-white" style={{ textShadow: "0 1px 2px rgba(0,0,0,0.15)" }}>扔瓶子</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePickBottle}
+                    className="btn-kid w-full min-h-[58px] rounded-[24px] flex items-center justify-center gap-3 px-4"
+                    style={{
+                      background: "linear-gradient(135deg, #4dd9c0 0%, #20b2aa 100%)",
+                      boxShadow: "0 5px 0 #148a82, 0 8px 16px rgba(32,178,170,0.3)",
+                    }}
+                  >
+                    <span className="text-[28px] leading-none" aria-hidden>🎣</span>
+                    <span className="text-[16px] font-extrabold text-white" style={{ textShadow: "0 1px 2px rgba(0,0,0,0.15)" }}>捞瓶子</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBottleSubState("inbox");
+                      fetchBottleInbox();
+                    }}
+                    className="btn-kid relative w-full min-h-[58px] rounded-[24px] flex items-center justify-center gap-3 px-4"
+                    style={{
+                      background: "linear-gradient(135deg, #b088f9 0%, #8b5cf6 100%)",
+                      boxShadow: "0 5px 0 #6335c4, 0 8px 16px rgba(139,92,246,0.3)",
+                    }}
+                  >
+                    <span className="text-[26px] leading-none" aria-hidden>✉️</span>
+                    <span className="text-[16px] font-extrabold text-white" style={{ textShadow: "0 1px 2px rgba(0,0,0,0.15)" }}>收件箱</span>
+                    {bottleInboxUnread > 0 && (
+                      <span className="absolute -top-1.5 -right-1 min-w-[24px] h-[24px] px-1.5 rounded-full bg-[#ff4757] text-white text-[12px] font-black flex items-center justify-center border-2 border-white shadow-md tabular-nums animate-bounce"
+                            style={{ animationDuration: "1.5s" }}>
+                        {bottleInboxUnread > 9 ? "9+" : bottleInboxUnread}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* THROW INPUT — voice */}
+            {bottleSubState === "throw_input" && (
+              <div className="flex flex-col items-center gap-5 pop-in w-full">
+                <div className="flex flex-col items-center gap-2.5 min-h-[72px] justify-center px-2">
+                  {isRecording ? (
+                    <>
+                      <div className="flex gap-2.5 items-end">
+                        {[0, 1, 2, 3, 4].map((i) => (
+                          <div
+                            key={i}
+                            className="w-[3px] rounded-full bg-[#ffb347] animate-bounce"
+                            style={{ height: 8 + (i % 3) * 8, animationDelay: `${i * 100}ms` }}
+                          />
+                        ))}
+                      </div>
+                      <p className="text-white text-[14px] font-extrabold" style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                        我在听哦…🎤
+                      </p>
+                    </>
+                  ) : isTranscribing ? (
+                    <p className="text-white/85 text-[14px] font-bold animate-pulse">稍等一下哦～✨</p>
+                  ) : bottleInput ? (
+                    <div className="flex flex-col items-center gap-1.5">
+                      <p className="text-[10px] text-white/50 font-semibold">你说的是：</p>
+                      <p className="text-white text-[15px] font-extrabold text-center leading-relaxed px-3 py-2 rounded-2xl bg-white/10">{bottleInput}</p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-1">
+                      <span className="text-[32px] leading-none">🎤</span>
+                      <p className="text-white/85 text-[13px] font-bold text-center leading-snug">
+                        按住侧面按钮说话吧！
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap justify-center items-center gap-x-4 gap-y-2.5 px-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBottleSubState("menu");
+                      setBottleInput("");
+                    }}
+                    className="btn-kid min-h-[44px] px-4 text-white/80 text-[13px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
+                  >
+                    返回
+                  </button>
+                  {bottleInput && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBottleInput("");
+                        setBottleAudioBase64("");
+                        setBottleAudioMime("");
+                      }}
+                      className="btn-kid min-h-[44px] px-4 text-white/80 text-[13px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
+                    >
+                      重新说 🔄
+                    </button>
+                  )}
+                  {bottleInput && (
+                    <button
+                      type="button"
+                      onClick={handleThrowBottle}
+                      className="btn-kid min-h-[48px] px-5 rounded-[20px] text-white text-[15px] font-black"
+                      style={{
+                        background: "linear-gradient(135deg, #ff9a56, #ff6b35)",
+                        boxShadow: "0 4px 0 #c44e1a, 0 6px 12px rgba(255,100,40,0.3)",
+                      }}
+                    >
+                      扔出去！🌊
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* THROWING ANIMATION */}
+            {bottleSubState === "throwing" && (
+              <div className="flex flex-col items-center gap-4">
+                <div className="bottle-throw text-[58px] leading-none">🫙</div>
+                <p className="text-white text-[15px] font-extrabold text-center px-4"
+                   style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                  嗖——飞出去啦！
+                </p>
+              </div>
+            )}
+
+            {/* THROW DONE */}
+            {bottleSubState === "throw_done" && (
+              <div className="flex flex-col items-center gap-3.5 pop-in px-3">
+                <div className="text-[52px] leading-none">🎉</div>
+                <p className="text-white text-[17px] font-black text-center"
+                   style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                  太棒了！漂走啦～
+                </p>
+                <p className="text-white/70 text-[12px] text-center leading-relaxed font-semibold">
+                  也许有小朋友会捡到哦
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setBottleSubState("menu")}
+                  className="btn-kid mt-1 min-h-[48px] px-6 rounded-[20px] text-white text-[14px] font-extrabold"
+                  style={{
+                    background: "linear-gradient(135deg, #4dd9c0, #20b2aa)",
+                    boxShadow: "0 4px 0 #148a82, 0 6px 12px rgba(32,178,170,0.25)",
+                  }}
+                >
+                  好的 👍
+                </button>
+              </div>
+            )}
+
+            {/* PICKING ANIMATION */}
+            {bottleSubState === "picking" && (
+              <div className="flex flex-col items-center gap-4">
+                <div className="text-[52px] leading-none animate-bounce" style={{ animationDuration: "0.8s" }}>🎣</div>
+                <p className="text-white text-[14px] font-extrabold"
+                   style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                  正在捞…
+                </p>
+                <div className="flex gap-2 items-center">
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="w-2 h-2 rounded-full bg-[#4dd9c0] animate-bounce"
+                      style={{ animationDelay: `${i * 200}ms` }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* PICKED — show bottle message */}
+            {bottleSubState === "picked" && pickedBottle && (
+              <div className="flex flex-col items-center gap-4 pop-in w-full">
+                {pickedBottle.id ? (
+                  <>
+                    <span className="bottle-rise inline-block text-[40px] leading-none">🫙</span>
+                    <div className="flex flex-col items-center gap-1.5 w-full max-w-[210px]">
+                      <p className="text-white/60 text-[11px] font-semibold">
+                        来自 {pickedBottle.senderName}
+                        {pickedBottle.senderGrade > 0 ? ` · ${pickedBottle.senderGrade}年级` : ""}
+                      </p>
+                      {pickedBottle.audioBase64 && (
+                        <button
+                          onClick={() => playAudioBase64(pickedBottle.audioBase64!, "friend")}
+                          className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/15 active:bg-white/25 transition-colors"
+                        >
+                          <span className="text-[14px]">▶️</span>
+                          <div className="flex gap-[2px] items-end">
+                            {[5,9,6,11,7,10,5,8].map((h, i) => (
+                              <div key={i} className="w-[2px] rounded-full bg-white/70" style={{ height: h }} />
+                            ))}
+                          </div>
+                          <span className="text-white/60 text-[10px] font-bold">播放</span>
+                        </button>
+                      )}
+                      <div className="w-full rounded-2xl bg-white/12 border border-white/20 px-3 py-2.5 mt-1">
+                        <p className="text-white text-[14px] font-bold text-center leading-relaxed">
+                          {pickedBottle.content}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-col w-full max-w-[210px] gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBottleSubState("replying");
+                          setBottleReplyInput("");
+                        }}
+                        className="btn-kid min-h-[50px] rounded-[20px] text-white text-[14px] font-black"
+                        style={{
+                          background: "linear-gradient(135deg, #ff9a56, #ff6b35)",
+                          boxShadow: "0 4px 0 #c44e1a, 0 6px 10px rgba(255,100,40,0.25)",
+                        }}
+                      >
+                        回 TA 一句 💬
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBottleSubState("menu")}
+                        className="btn-kid min-h-[44px] rounded-2xl text-white/80 text-[13px] font-bold bg-white/10 active:bg-white/20 transition-colors"
+                      >
+                        放回大海 🌊
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center gap-4 px-3">
+                    <div className="text-[48px] leading-none">🐟</div>
+                    <p className="text-white text-[14px] font-bold text-center leading-snug"
+                       style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                      {pickedBottle.content}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBottleSubState("throw_input");
+                        setBottleInput("");
+                      }}
+                      className="btn-kid min-h-[50px] px-5 rounded-[20px] text-white text-[14px] font-black"
+                      style={{
+                        background: "linear-gradient(135deg, #ff9a56, #ff6b35)",
+                        boxShadow: "0 4px 0 #c44e1a, 0 6px 10px rgba(255,100,40,0.25)",
+                      }}
+                    >
+                      我来扔一个！🫙
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* REPLYING — voice */}
+            {bottleSubState === "replying" && (
+              <div className="flex flex-col items-center gap-5 pop-in w-full px-2">
+                <div className="flex flex-col items-center gap-2.5 min-h-[72px] justify-center">
+                  {isRecording ? (
+                    <>
+                      <div className="flex gap-2.5 items-end">
+                        {[0, 1, 2, 3, 4].map((i) => (
+                          <div
+                            key={i}
+                            className="w-[3px] rounded-full bg-[#b088f9] animate-bounce"
+                            style={{ height: 8 + (i % 3) * 8, animationDelay: `${i * 100}ms` }}
+                          />
+                        ))}
+                      </div>
+                      <p className="text-white text-[14px] font-extrabold" style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                        我在听哦…🎤
+                      </p>
+                    </>
+                  ) : isTranscribing ? (
+                    <p className="text-white/85 text-[14px] font-bold animate-pulse">稍等一下哦～✨</p>
+                  ) : bottleReplyInput ? (
+                    <div className="flex flex-col items-center gap-1.5">
+                      <p className="text-[10px] text-white/50 font-semibold">你的回复：</p>
+                      <p className="text-white text-[15px] font-extrabold text-center leading-relaxed px-3 py-2 rounded-2xl bg-white/10">{bottleReplyInput}</p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-1">
+                      <span className="text-[32px] leading-none">💬</span>
+                      <p className="text-white/85 text-[13px] font-bold text-center leading-snug">
+                        按住侧面按钮回话吧！
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap justify-center items-center gap-x-4 gap-y-2.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBottleSubState("picked");
+                      setBottleReplyInput("");
+                    }}
+                    className="btn-kid min-h-[44px] px-4 text-white/80 text-[13px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
+                  >
+                    返回
+                  </button>
+                  {bottleReplyInput && (
+                    <button
+                      type="button"
+                      onClick={() => setBottleReplyInput("")}
+                      className="btn-kid min-h-[44px] px-4 text-white/80 text-[13px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
+                    >
+                      重新说 🔄
+                    </button>
+                  )}
+                  {bottleReplyInput && (
+                    <button
+                      type="button"
+                      onClick={handleReplyBottle}
+                      disabled={bottleLoading}
+                      className="btn-kid min-h-[48px] px-5 rounded-[20px] text-white text-[15px] font-black disabled:opacity-40"
+                      style={{
+                        background: "linear-gradient(135deg, #b088f9, #8b5cf6)",
+                        boxShadow: "0 4px 0 #6335c4, 0 6px 12px rgba(139,92,246,0.3)",
+                      }}
+                    >
+                      {bottleLoading ? "发送中…" : "发出去 ✉️"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* REPLY DONE */}
+            {bottleSubState === "reply_done" && (
+              <div className="flex flex-col items-center gap-3.5 pop-in px-3">
+                <div className="text-[52px] leading-none">🎉</div>
+                <p className="text-white text-[17px] font-black text-center"
+                   style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                  回信成功啦！
+                </p>
+                <p className="text-white/70 text-[12px] text-center leading-relaxed font-semibold">
+                  对方能看到你的话啦
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setBottleSubState("menu")}
+                  className="btn-kid mt-1 min-h-[48px] px-6 rounded-[20px] text-white text-[14px] font-extrabold"
+                  style={{
+                    background: "linear-gradient(135deg, #b088f9, #8b5cf6)",
+                    boxShadow: "0 4px 0 #6335c4, 0 6px 12px rgba(139,92,246,0.25)",
+                  }}
+                >
+                  太棒了 ✨
+                </button>
+              </div>
+            )}
+
+            {/* INBOX */}
+            {bottleSubState === "inbox" && (
+              <div className="w-full flex flex-col gap-2.5 flex-1 min-h-0 max-w-[230px] self-center">
+                <p className="text-white text-[15px] font-black text-center shrink-0"
+                   style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
+                  ✉️ 我的回信
+                </p>
+                <div className="flex-1 min-h-0 w-full flex flex-col gap-2.5 overflow-y-auto" style={{ maxHeight: 160 }}>
+                  {bottleLoading ? (
+                    <div className="flex justify-center py-10">
+                      <div className="flex gap-2 items-center">
+                        {[0, 1, 2].map((i) => (
+                          <span
+                            key={i}
+                            className="w-2.5 h-2.5 rounded-full bg-[#b088f9] animate-bounce"
+                            style={{ animationDelay: `${i * 180}ms` }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : bottleInbox.length === 0 ? (
+                    <div className="flex flex-col items-center gap-3.5 py-6 px-2">
+                      <div className="text-[44px] leading-none" aria-hidden>📭</div>
+                      <p className="text-white/85 text-[13px] font-bold text-center leading-snug">
+                        还没有回信
+                      </p>
+                      <p className="text-white/55 text-[11px] text-center font-medium">先去扔个瓶子吧～</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBottleSubState("throw_input");
+                          setBottleInput("");
+                        }}
+                        className="btn-kid min-h-[48px] px-5 rounded-[20px] text-white text-[14px] font-black"
+                        style={{
+                          background: "linear-gradient(135deg, #ff9a56, #ff6b35)",
+                          boxShadow: "0 4px 0 #c44e1a, 0 6px 10px rgba(255,100,40,0.25)",
+                        }}
+                      >
+                        去扔一个！🫙
+                      </button>
+                    </div>
+                  ) : (
+                    bottleInbox.map((b, i) => (
+                      <div key={i} className="flex flex-col gap-1.5 rounded-2xl bg-white/12 border border-white/20 px-3 py-2.5">
+                        <p className="text-white/55 text-[10px] font-semibold leading-relaxed">我说：{b.content}</p>
+                        <p className="text-white text-[13px] font-bold leading-relaxed">
+                          💬 {b.reply.repliedByName}：{b.reply.content}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBottleSubState("menu")}
+                  className="btn-kid shrink-0 w-full min-h-[48px] rounded-[20px] text-white text-[14px] font-extrabold"
+                  style={{
+                    background: "linear-gradient(135deg, #4dd9c0, #20b2aa)",
+                    boxShadow: "0 4px 0 #148a82, 0 6px 10px rgba(32,178,170,0.25)",
+                  }}
+                >
+                  回到海边 🌊
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Ocean waves — layered for depth */}
+          <div className="absolute bottom-0 inset-x-0 pointer-events-none overflow-hidden" style={{ height: 52 }}>
+            <div className="wave-anim absolute inset-0" style={{ display: "flex", width: "200%", height: "100%", animationDuration: "6s" }}>
+              <svg viewBox="0 0 400 52" style={{ width: "50%", height: "100%" }} preserveAspectRatio="none">
+                <path d="M0,20 C50,8 100,32 150,20 C200,8 250,32 300,20 C350,8 395,18 400,20 L400,52 L0,52 Z" fill="rgba(255,255,255,0.12)" />
+              </svg>
+              <svg viewBox="0 0 400 52" style={{ width: "50%", height: "100%" }} preserveAspectRatio="none">
+                <path d="M0,20 C50,8 100,32 150,20 C200,8 250,32 300,20 C350,8 395,18 400,20 L400,52 L0,52 Z" fill="rgba(255,255,255,0.12)" />
+              </svg>
+            </div>
+            <div className="wave-anim absolute inset-0" style={{ display: "flex", width: "200%", height: "100%", animationDuration: "4s", animationDirection: "reverse" }}>
+              <svg viewBox="0 0 400 52" style={{ width: "50%", height: "100%" }} preserveAspectRatio="none">
+                <path d="M0,30 C60,16 130,44 200,30 C270,16 340,44 400,30 L400,52 L0,52 Z" fill="rgba(150,230,255,0.15)" />
+              </svg>
+              <svg viewBox="0 0 400 52" style={{ width: "50%", height: "100%" }} preserveAspectRatio="none">
+                <path d="M0,30 C60,16 130,44 200,30 C270,16 340,44 400,30 L400,52 L0,52 Z" fill="rgba(150,230,255,0.15)" />
+              </svg>
+            </div>
+          </div>
+        </div>
       ) : (
-        /* ── room: chat bubble layout ── */
-        <div className="flex flex-col h-full min-h-0 relative bg-[#fdf5ff]">
+        /* ── room: portrait — speaker character center, chat overlay bottom ── */
+        <div className="relative h-full min-h-0 overflow-hidden" style={{ background: "linear-gradient(180deg, #5bc8f5 0%, #a8dff5 28%, #fdf6e3 62%, #fde4a0 100%)" }}>
+
+          {/* Volume toast */}
           {showVolume && (
-            <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+            <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
               <div className="bg-black/60 text-white rounded-2xl px-5 py-3 text-lg font-bold">
                 🔊 {volume}
               </div>
             </div>
           )}
 
-          {translationPopup && (
-            <div
-              className="absolute inset-0 z-50 bg-black/25 flex items-end justify-center pb-[80px]"
-              onClick={() => setTranslationPopup(null)}
-            >
-              <div
-                className="bg-white rounded-[28px] w-full mx-4 shadow-2xl overflow-hidden pt-5 pb-4"
-                onClick={(e) => e.stopPropagation()}
-              >
-                {translationPopup.loading ? (
-                  /* loading */
-                  <div className="flex gap-1.5 items-center justify-center py-5">
-                    {[0,1,2].map(i => (
-                      <span key={i} className="w-2.5 h-2.5 rounded-full bg-[#c4a0e0] animate-bounce" style={{ animationDelay: `${i * 140}ms` }} />
-                    ))}
-                    <span className="text-[12px] text-[#9575cd] font-bold ml-2">Tino 翻译中…</span>
-                  </div>
-                ) : (
-                  <>
-                    {/* word phonetics cards */}
-                    {translationPopup.words.length > 0 && (
-                      <div className="px-4 flex flex-wrap gap-2 justify-center">
-                        {translationPopup.words.map(({ word, phonetic }, i) => (
-                          <button
-                            key={i}
-                            onClick={() => playTTS(word.replace(/[.,!?;:]/g, ""), "tino")}
-                            className="flex flex-col items-center bg-white border border-[#eae2f5] rounded-2xl px-3.5 py-2.5 shadow-sm active:bg-[#f5eeff] active:scale-95 transition-all min-w-[52px]"
-                          >
-                            <span className="text-[17px] font-black text-[#1a1020] leading-none tracking-tight">{word}</span>
-                            <span className="text-[10px] text-[#9575cd] leading-none mt-1 font-medium">{phonetic}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+          {/* Translation popup */}
+          {/* Exit button */}
+          <button
+            className="absolute top-2.5 left-2.5 z-20 flex items-center gap-1 bg-white/55 backdrop-blur-sm text-[#2a5a8a] text-[11px] font-bold px-2.5 py-1.5 rounded-full active:bg-white/75 transition-colors border border-white/60 shadow-sm"
+            onClick={() => { if (showExitConfirm) leaveRoom(); else setShowExitConfirm(true); }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 12H5M12 5l-7 7 7 7"/>
+            </svg>
+            退出
+          </button>
 
-                    {/* full sentence */}
-                    {translationPopup.english && (
-                      <div className="mx-4 mt-3.5 flex items-center gap-2 bg-[#f3eef8] rounded-2xl px-4 py-3">
-                        <p className="flex-1 text-[14px] font-bold text-[#5a3880] leading-snug">{translationPopup.english}</p>
-                        <button
-                          onClick={() => playTTS(translationPopup.english, "tino")}
-                          className="flex-shrink-0 w-8 h-8 rounded-full bg-[#7c3fa8]/10 text-[#7c3fa8] flex items-center justify-center active:bg-[#7c3fa8]/22 transition-colors"
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                            <polygon points="6,3 20,12 6,21" />
-                          </svg>
-                        </button>
-                      </div>
-                    )}
-
-                    {/* recording hint */}
-                    <div className="mt-3.5 flex justify-center">
-                      <p className="text-[13px] font-bold text-[#22c55e]">按住右侧按键跟读一遍</p>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
+          {/* Exit confirm toast */}
           {showExitConfirm && (
-            <div className="absolute top-14 left-1/2 -translate-x-1/2 z-30 bg-black/70 text-white text-[10px] font-bold px-3 py-1.5 rounded-full whitespace-nowrap pointer-events-none">
+            <div className="absolute top-12 left-1/2 -translate-x-1/2 z-30 bg-white/80 text-[#2a5a8a] text-[10px] font-bold px-3 py-1.5 rounded-full whitespace-nowrap pointer-events-none shadow-md border border-white/60 backdrop-blur-sm">
               再次点击退出聊天
             </div>
           )}
 
-          {/* ── Header ── */}
-          <div className="flex-shrink-0 flex items-center justify-between px-3 pt-2.5 pb-2 bg-gradient-to-r from-[#fce4f6] to-[#e8eeff]">
-            {/* back / title */}
-            <button
-              className="flex items-center gap-1 text-[#7c3fa8] active:opacity-60 transition-opacity"
-              onClick={() => { if (showExitConfirm) leaveRoom(); else setShowExitConfirm(true); }}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M19 12H5M12 5l-7 7 7 7"/>
-              </svg>
-              <span className="text-[12px] font-black text-[#7c3fa8]">英语角</span>
-            </button>
-
-            {/* participant avatars */}
-            <div className="flex items-center gap-1.5">
-              {/* Tino */}
-              <div className="relative">
-                <TinoAvatar size={22} expression="happy" />
-                <span className="absolute -top-1 -right-1.5 bg-violet-500 text-white text-[5px] font-bold px-[2.5px] py-[0.5px] rounded-sm leading-tight">AI</span>
-              </div>
-              {/* AI buddy */}
-              <div className="relative">
-                <Image src={avatarBuddy} alt="buddy" width={22} height={22} className="rounded-full object-cover object-top" style={{ width: 22, height: 22 }} />
-                <span className="absolute -top-1 -right-1.5 bg-violet-500 text-white text-[5px] font-bold px-[2.5px] py-[0.5px] rounded-sm leading-tight">AI</span>
-              </div>
-              <span className="text-[9px] text-[#a890c8]">+</span>
-              {/* User */}
-              <div
-                className="rounded-full overflow-hidden"
-                style={{ width: 22, height: 22, ...(activeFrame !== "none" ? userFrameStyle : {}) }}
-              >
-                <Image src={avatarUser} alt="me" width={22} height={22} className="object-cover object-top w-full h-full" />
-              </div>
-              {/* Friend */}
-              <div className="w-[22px] h-[22px] rounded-full overflow-hidden">
-                <Image src={avatarFriend} alt={partner?.name || "友"} width={22} height={22} className="object-cover object-top w-full h-full" />
-              </div>
-            </div>
-
-            {/* add friend button */}
-            {(() => {
-              const alreadyAdded = partner && friendsList.some(
-                (f) => f.name === partner.name && f.grade === partner.grade
-              );
-              return alreadyAdded ? (
-                <span className="px-2.5 py-1 rounded-full bg-[#ede8f8] text-[#a890c8] text-[10px] font-bold">已添加 ✓</span>
-              ) : (
-                <button
-                  onClick={() => partner && setShowAddFriend(true)}
-                  className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-[#ede8f8] text-[#7c3fa8] active:bg-[#ddd0f4] transition-colors"
-                >
-                  +加好友
-                </button>
-              );
-            })()}
-          </div>
-
-          {/* ── Add friend confirm dialog ── */}
+          {/* Add friend dialog */}
           {showAddFriend && partner && (
             <div
-              className="absolute inset-0 z-40 bg-black/40 flex items-center justify-center px-6"
+              className="absolute inset-0 z-40 bg-black/60 flex items-center justify-center px-5"
               onClick={() => setShowAddFriend(false)}
             >
               <div
@@ -2524,10 +3115,7 @@ export default function Home() {
                   <p className="text-[10px] text-[#c4a0b0] mt-0.5">之后可以在好友列表找到 ta</p>
                 </div>
                 <div className="flex gap-2 w-full">
-                  <button
-                    onClick={() => setShowAddFriend(false)}
-                    className="flex-1 py-2 rounded-full bg-gray-100 text-[#888] text-xs font-bold active:bg-gray-200 transition-colors"
-                  >
+                  <button onClick={() => setShowAddFriend(false)} className="flex-1 py-2 rounded-full bg-gray-100 text-[#888] text-xs font-bold active:bg-gray-200 transition-colors">
                     取消
                   </button>
                   <button
@@ -2535,13 +3123,8 @@ export default function Home() {
                       try {
                         const raw = localStorage.getItem("tino_friends_list");
                         const existing: FriendRecord[] = raw ? JSON.parse(raw) : [];
-                        const filtered = existing.filter(
-                          (f) => f.name !== partner.name || f.grade !== partner.grade
-                        );
-                        const updated = [
-                          { name: partner.name, grade: partner.grade, lastChatAt: Date.now() },
-                          ...filtered,
-                        ].slice(0, 20);
+                        const filtered = existing.filter((f) => f.name !== partner.name || f.grade !== partner.grade);
+                        const updated = [{ name: partner.name, grade: partner.grade, lastChatAt: Date.now() }, ...filtered].slice(0, 20);
                         localStorage.setItem("tino_friends_list", JSON.stringify(updated));
                         setFriendsList(updated);
                       } catch { /* storage unavailable */ }
@@ -2556,135 +3139,147 @@ export default function Home() {
             </div>
           )}
 
-          {/* ── Message card + navigation ── */}
-          {(() => {
-            const navMsgs = roomMsgs.filter((m) => m.sender !== "system");
-            const totalNav = navMsgs.length;
-            const viewIdx = totalNav === 0 ? -1 : Math.max(0, totalNav - 1 - roomViewOffset);
-            const viewedMsg = viewIdx >= 0 ? navMsgs[viewIdx] : null;
-            const canPrev = viewIdx > 0;
-            const canNext = roomViewOffset > 0;
+          {/* Radial warm stage — softens character edges on sunny background */}
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              background: `radial-gradient(ellipse 88% 75% at 50% 36%, rgba(255,252,230,0.92) 0%, rgba(255,240,180,0.45) 50%, transparent 72%)`
+            }}
+          />
 
-            /* card sender meta */
-            const isTino = viewedMsg?.sender === "tino";
-            const isBuddy = viewedMsg?.sender === "ai_buddy";
-            const isUser = viewedMsg?.sender === "user";
-            const isAISender = isTino || isBuddy;
-            const cardName = isTino
-              ? "Tino"
-              : isBuddy
-              ? (aiBuddyName || "Buddy")
-              : isUser
-              ? userName
-              : (partner?.name || "小伙伴");
-            const cardNameColor = isTino
-              ? "#7c3fa8"
-              : isBuddy
-              ? "#2a8a6a"
-              : isUser
-              ? "#1a6fb0"
-              : "#2a6a5a";
-            const cardTranslation = viewedMsg ? roomTranslations[viewedMsg.id] : undefined;
-            const isLatest = viewIdx === totalNav - 1;
-            const isTyping = isLoading && isLatest && !isUser;
+          {/* Speaker character — full screen, multiply removes white bg naturally */}
+          <div className="absolute inset-0">
+            {centerSpeaker === "tino" ? (
+              <Image
+                src={portraitBuddy}
+                alt="Buddy"
+                fill
+                sizes="210px"
+                className="object-contain"
+                style={{ mixBlendMode: "multiply", objectPosition: "center 25%" }}
+                priority
+              />
+            ) : centerSpeaker === "ai_buddy" ? (
+              <Image
+                src={portraitPartner}
+                alt="Partner"
+                fill
+                sizes="210px"
+                className="object-contain"
+                style={{ mixBlendMode: "multiply", objectPosition: "center 25%" }}
+              />
+            ) : centerSpeaker === "user" ? (
+              <Image
+                src={portraitUser}
+                alt="User"
+                fill
+                sizes="210px"
+                className="object-contain"
+                style={{ mixBlendMode: "multiply", objectPosition: "center 25%" }}
+              />
+            ) : (
+              <Image
+                src={portraitPartner}
+                alt="Friend"
+                fill
+                sizes="210px"
+                className="object-contain"
+                style={{ mixBlendMode: "multiply", objectPosition: "center 25%" }}
+              />
+            )}
+          </div>
 
-            return (
-              <div className="flex-1 min-h-0 flex flex-col px-3 pt-1.5 pb-1 gap-1">
-                {/* system pills */}
-                {roomMsgs.filter((m) => m.sender === "system").slice(-2).map((m) => (
-                  <div key={m.id} className="flex justify-center">
-                    <span className="text-[9px] text-[#b090c8] bg-[#f0e8f8] px-2.5 py-0.5 rounded-full">{m.content}</span>
-                  </div>
-                ))}
 
-                {/* featured message card — horizontal: avatar/name LEFT, content RIGHT */}
-                <div className="flex-1 min-h-0 flex">
-                  <div className="w-full bg-white rounded-3xl shadow-md overflow-hidden flex">
-                    {/* left: avatar + name */}
-                    <div className="flex-shrink-0 flex flex-col items-center justify-start gap-1 pt-2 px-2.5 pb-2 w-[50px]">
-                      <div className="relative">
-                        {!viewedMsg ? (
-                          <div className="w-9 h-9 rounded-full bg-gray-100" />
-                        ) : isTino ? (
-                          <TinoAvatar size={36} expression="happy" />
-                        ) : isBuddy ? (
-                          <Image src={avatarBuddy} alt="buddy" width={36} height={36} className="rounded-full object-cover object-top" style={{ width: 36, height: 36 }} />
-                        ) : isUser ? (
-                          <div className="rounded-full overflow-hidden" style={{ width: 36, height: 36, ...(activeFrame !== "none" ? userFrameStyle : {}) }}>
-                            <Image src={avatarUser} alt="me" width={36} height={36} className="object-cover object-top w-full h-full" />
-                          </div>
-                        ) : (
-                          <div className="w-9 h-9 rounded-full overflow-hidden">
-                            <Image src={avatarFriend} alt={partner?.name || "友"} width={36} height={36} className="object-cover object-top w-full h-full" />
-                          </div>
-                        )}
-                        {isAISender && viewedMsg && (
-                          <span className="absolute -top-1 -right-1 bg-violet-500 text-white text-[5px] font-bold px-[2.5px] py-[0.5px] rounded-sm leading-tight">AI</span>
-                        )}
-                      </div>
-                      <span className="text-[9px] font-bold text-center leading-tight break-all" style={{ color: cardNameColor }}>
-                        {cardName || "…"}
+
+          {/* Bottom gradient fade — warm cream */}
+          <div
+            className="absolute bottom-0 inset-x-0 pointer-events-none"
+            style={{ height: "55%", background: "linear-gradient(to top, rgba(253,228,155,0.97) 30%, rgba(253,240,200,0.75) 60%, transparent)" }}
+          />
+
+          {/* BOTTOM chat overlay */}
+          <div className="absolute bottom-0 inset-x-0 z-10 px-2.5 pb-2">
+            {(() => {
+              const navMsgs = roomMsgs.filter((m) => m.sender !== "system");
+              const totalNav = navMsgs.length;
+              const viewIdx = totalNav === 0 ? -1 : Math.max(0, totalNav - 1 - roomViewOffset);
+              const viewedMsg = viewIdx >= 0 ? navMsgs[viewIdx] : null;
+              const canPrev = viewIdx > 0;
+              const canNext = roomViewOffset > 0;
+
+              const isTino = viewedMsg?.sender === "tino";
+              const isBuddy = viewedMsg?.sender === "ai_buddy";
+              const isUser = viewedMsg?.sender === "user";
+              const isAISender = isTino || isBuddy;
+              const cardName = isTino
+                ? "Tino"
+                : isBuddy
+                ? (aiBuddyName || "Buddy")
+                : isUser
+                ? (userName || "我")
+                : (partner?.name || "小伙伴");
+              const cardTranslation = viewedMsg ? roomTranslations[viewedMsg.id] : undefined;
+              const isLatest = viewIdx === totalNav - 1;
+              const isTyping = isLoading && isLatest && !isUser;
+
+              return (
+                <>
+                  {/* System pills */}
+                  {roomMsgs.filter((m) => m.sender === "system").slice(-2).map((m) => (
+                    <div key={m.id} className="flex justify-center mb-1">
+                      <span className="text-[9px] text-[#6a8aaa] bg-white/50 px-2.5 py-0.5 rounded-full">{m.content}</span>
+                    </div>
+                  ))}
+
+                  {/* Speaker name badge */}
+                  {viewedMsg && (
+                    <div className="flex items-center justify-center gap-1.5 mb-1.5">
+                      <span className="bg-white/70 backdrop-blur-sm text-[#1a4a7a] text-[10px] font-bold px-3 py-0.5 rounded-full shadow-sm border border-white/60">
+                        {cardName}
+                        {isAISender && <span className="ml-1 text-[8px] text-[#f59e0b]">AI</span>}
                       </span>
                       {(isTyping || (isSpeaking && isLatest && !isUser)) && (
-                        <span className="text-[8px] text-gray-400 animate-pulse">说话中</span>
+                        <span className="text-[9px] text-[#e07b30] animate-pulse font-bold">说话中…</span>
                       )}
                     </div>
+                  )}
 
-                    {/* right: content */}
-                    <div className="flex-1 min-w-0 flex flex-col overflow-hidden pt-1.5 pr-2 pb-2 pl-1">
-                      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5">
-                        {isTyping ? (
-                          <div className="flex gap-1.5 items-center h-8">
-                            {[0,1,2].map(i => (
-                              <span key={i} className="w-2.5 h-2.5 rounded-full bg-gray-300 animate-bounce" style={{ animationDelay: `${i * 150}ms` }} />
-                            ))}
-                          </div>
-                        ) : viewedMsg ? (
-                          <>
-                            <p className="text-[17px] font-black text-[#1e1218] leading-snug whitespace-pre-wrap">
-                              {viewedMsg.content}
-                            </p>
-                            {cardTranslation && (
-                              <p className="text-[11px] text-gray-400 leading-snug">{cardTranslation}</p>
-                            )}
-                            {!cardTranslation && !isUser && (
-                              <p className="text-[10px] text-gray-200">翻译中...</p>
-                            )}
-                          </>
-                        ) : (
-                          <p className="text-[13px] text-gray-300 mt-2">等待聊天开始…</p>
+                  {/* Message card */}
+                  <div className="bg-white/65 backdrop-blur-md rounded-[16px] border border-white/80 px-3.5 py-2.5 min-h-[56px] shadow-md">
+                    {isTyping ? (
+                      <div className="flex gap-1.5 items-center h-8">
+                        {[0,1,2].map(i => (
+                          <span key={i} className="w-2.5 h-2.5 rounded-full bg-[#5bc8f5] animate-bounce" style={{ animationDelay: `${i * 150}ms` }} />
+                        ))}
+                      </div>
+                    ) : viewedMsg ? (
+                      <div className="max-h-[72px] overflow-y-auto">
+                        <p className="text-[14px] font-black text-[#1a2e4a] leading-snug whitespace-pre-wrap">
+                          {viewedMsg.content}
+                        </p>
+                        {cardTranslation && (
+                          <p className="text-[10px] text-[#5a7a9a] leading-snug mt-1">{cardTranslation}</p>
+                        )}
+                        {!cardTranslation && !isUser && (
+                          <p className="text-[9px] text-[#b0c8d8] mt-0.5">翻译中...</p>
                         )}
                       </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* bottom: nav arrows + companion-style status text */}
-                <div className="flex-shrink-0 flex items-center justify-between">
-                  <button
-                    disabled={!canPrev}
-                    onClick={() => setRoomViewOffset((o) => Math.min(totalNav - 1, o + 1))}
-                    className="w-7 h-7 rounded-full flex items-center justify-center text-[14px] font-bold disabled:opacity-20 active:bg-gray-100 transition-colors text-[#7c3fa8]"
-                  >
-                    ◀
-                  </button>
-                  <div className="flex flex-col items-center">
-                    <span className={`text-[12px] font-bold ${companionStatusAccent}`}>{statusText}</span>
-                    {companionStatusHint && (
-                      <span className="text-[9px] text-[#c4a0b0]">{companionStatusHint}</span>
+                    ) : (
+                      <p className="text-[12px] text-[#a0b8c8]">等待聊天开始…</p>
                     )}
                   </div>
-                  <button
-                    disabled={!canNext}
-                    onClick={() => setRoomViewOffset((o) => Math.max(0, o - 1))}
-                    className="w-7 h-7 rounded-full flex items-center justify-center text-[14px] font-bold disabled:opacity-20 active:bg-gray-100 transition-colors text-[#7c3fa8]"
-                  >
-                    ▶
-                  </button>
-                </div>
-              </div>
-            );
-          })()}
+
+                  {/* Status */}
+                  <div className="flex justify-center mt-1.5">
+                    <span className={`text-[11px] font-bold ${companionStatusAccent}`}>{statusText}</span>
+                    {companionStatusHint && (
+                      <span className="text-[9px] text-[#8aaa c0] ml-1.5">{companionStatusHint}</span>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
         </div>
       )}
     </DeviceFrame>
