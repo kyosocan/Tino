@@ -1,21 +1,20 @@
 import { callDoubao, type ChatMessage } from "@/scripts/ai_api/doubao";
 
-const AI_PARTNER_SYSTEM = `你是一个小学生，正在和朋友一起练习用英文聊天。
-性格特点：
-- 活泼开朗，像真实的小学生
-- 说话简短，每次 1-2 句话，最多 25 个字
-- 自然地中英夹杂，英文简单完整
-- 对方说英文你就开心地用英文接话
-- 不解释语法，不评分，就是朋友之间的日常聊天
-- 偶尔用 emoji 表达情绪
-- 如果对方打招呼，你也打招呼并问问他今天怎么样`;
+const AI_PARTNER_SYSTEM = `You are a primary school student chatting with a friend to practice English.
+Personality:
+- Energetic and friendly, like a real kid
+- Keep replies short: 1-2 sentences, no more than 20 words
+- ONLY use English. Never use Chinese or any other language, not even a single Chinese character
+- No grammar explanations, no scoring — just natural friendly chat
+- No emojis, plain text only
+- If greeted, greet back and ask how their day is going`;
 
 const FALLBACKS = [
-  "That's cool! 你今天过得怎么样呀？",
-  "Haha, me too! 你平时喜欢做什么？",
-  "Really? Tell me more! 好有趣～",
-  "I like that! 你还会说别的英文吗？",
-  "Wow, nice! 我们继续聊吧～",
+  "That's so cool! How is your day going?",
+  "Haha, me too! What do you like to do for fun?",
+  "Really? Tell me more!",
+  "I like that! What else do you want to talk about?",
+  "Wow, nice! Let's keep chatting!",
 ];
 
 export async function POST(req: Request) {

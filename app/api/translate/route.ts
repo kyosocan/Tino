@@ -32,23 +32,37 @@ export async function POST(req: Request) {
     ];
 
     const result = await callDoubao(msgs, {
-      model: process.env.ARK_TRANSLATE_MODEL || "doubao-seed-2-0-lite-260215",
-      timeoutMs: Number(process.env.ARK_TRANSLATE_TIMEOUT_MS || "8000"),
-      retries: 1,
+      model: process.env.ARK_TRANSLATE_MODEL, // falls back to ARK_MODEL in doubao.ts
+      timeoutMs: Number(process.env.ARK_TRANSLATE_TIMEOUT_MS || "30000"),
+      retries: 2,
     });
 
     if (isEn2Zh) return Response.json({ chinese: result || "" });
 
     try {
-      const jsonStr = (result || "").replace(/```json\n?|```\n?/g, "").trim();
+      const stripped = (result || "").replace(/```json\n?|```\n?/g, "").trim();
+      // Extract JSON object even if the model adds surrounding text
+      const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+      const jsonStr = jsonMatch ? jsonMatch[0] : stripped;
       const parsed = JSON.parse(jsonStr);
+      const english = (parsed.english || "").trim();
+      let words: { word: string; phonetic: string }[] = Array.isArray(parsed.words) ? parsed.words : [];
+      // If model returned english but no words, auto-split as fallback
+      if (english && words.length === 0) {
+        words = english.split(/\s+/).filter((w: string) => w.length > 0).map((w: string) => ({ word: w, phonetic: "" }));
+      }
       return Response.json({
-        english: (parsed.english || "").trim(),
-        words: Array.isArray(parsed.words) ? parsed.words : [],
+        english,
+        words,
         voiceGuide: (parsed.voiceGuide || "").trim(),
       });
     } catch {
-      return Response.json({ english: (result || "").trim(), words: [], voiceGuide: "" });
+      const english = (result || "").trim();
+      // Even in fallback, auto-split the english into words
+      const words = english
+        ? english.split(/\s+/).filter((w: string) => w.length > 0).map((w: string) => ({ word: w, phonetic: "" }))
+        : [];
+      return Response.json({ english, words, voiceGuide: "" });
     }
   } catch (error) {
     console.error("[Translate API Error]", error);

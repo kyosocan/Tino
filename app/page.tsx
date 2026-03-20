@@ -6,8 +6,8 @@ import DeviceFrame from "@/components/DeviceFrame";
 import TinoAvatar from "@/components/TinoAvatar";
 import tinoPortrait from "@/scripts/ai_api/人物像.png";
 import avatarUser from "@/scripts/ai_api/头像  user.png";
-import avatarBuddy from "@/scripts/ai_api/头像 1.png";
-import avatarFriend from "@/scripts/ai_api/头像 2.png";
+import avatarBuddy from "@/scripts/ai_api/头像 2.png";
+import avatarFriend from "@/scripts/ai_api/头像 1.png";
 import type {
   Message,
   AppMode,
@@ -21,10 +21,9 @@ import type {
  *
  * Rules:
  *  1. Always split on \n (newline = natural pause boundary).
- *  2. Line contains Chinese  → split only on Chinese punctuation 。！？
- *     (avoids splitting "How are you?" inside a Chinese sentence)
- *  3. Pure-English line      → split on .!? only when followed by
- *     space + uppercase letter, or at end of string.
+ *  2. Line contains Chinese  → split only on 。 (period); ！？ no longer split.
+ *  3. Pure-English line      → split on . only when followed by
+ *     space + uppercase letter, or at end of string; ! and ? no longer split.
  */
 function splitIntoSentences(text: string): string[] {
   const results: string[] = [];
@@ -36,19 +35,19 @@ function splitIntoSentences(text: string): string[] {
     const hasChinese = /[\u4e00-\u9fff]/.test(line);
 
     if (hasChinese) {
-      /* Chinese / mixed: split only on Chinese sentence-ending punctuation */
-      const chunks = line.split(/([。！？]+)/);
+      /* Chinese / mixed: split only on Chinese full-stop 。 */
+      const chunks = line.split(/(。+)/);
       for (let i = 0; i < chunks.length; i += 2) {
         const combined = ((chunks[i] ?? "") + (chunks[i + 1] ?? "")).trim();
         if (combined) results.push(combined);
       }
     } else {
-      /* Pure English: split on .!? when followed by space+uppercase or end */
+      /* Pure English: split on . only when followed by space+uppercase or end */
       let current = "";
       for (let i = 0; i < line.length; i++) {
         const ch = line[i];
         current += ch;
-        if (/[.!?]/.test(ch)) {
+        if (ch === ".") {
           const next = line[i + 1] ?? "";
           const afterNext = line[i + 2] ?? "";
           const atEnd = !next;
@@ -467,6 +466,8 @@ export default function Home() {
   /* room chat UI */
   const [roomTopic] = useState("");
   const [icebreakerDone, setIcebreakerDone] = useState(false);
+  const icebreakerDoneRef = useRef(false);
+  useEffect(() => { icebreakerDoneRef.current = icebreakerDone; }, [icebreakerDone]);
   const [roomReady, setRoomReady] = useState(false);
   const [aiBuddyName, setAiBuddyName] = useState("");
   const roomBottomRef = useRef<HTMLDivElement>(null);
@@ -476,7 +477,7 @@ export default function Home() {
   const [roomTranslations, setRoomTranslations] = useState<Record<string, string>>({});
 
   /* post-room debrief */
-  const pendingDebriefRef = useRef<string[] | null>(null);
+  const [pendingDebrief, setPendingDebrief] = useState<string[] | null>(null);
 
   /* room */
   const [timeLeft, setTimeLeft] = useState(ROOM_DURATION);
@@ -500,6 +501,12 @@ export default function Home() {
   const roomMsgsRef = useRef<Message[]>([]);
   useEffect(() => { roomMsgsRef.current = roomMsgs; }, [roomMsgs]);
 
+  /* icebreaker: resolver called when user sends their first reply */
+  const icebreakerResolveRef = useRef<(() => void) | null>(null);
+
+  /* silence hint: track isSpeaking prev value to detect true→false */
+  const wasSpeakingRef = useRef(false);
+
   /* translation popup */
   const [translationPopup, setTranslationPopup] = useState<{
     chinese: string;
@@ -508,6 +515,20 @@ export default function Home() {
     voiceGuide: string;
     loading: boolean;
   } | null>(null);
+
+  /* silence hint (room mode: shown after 7s without user speaking) */
+  const SILENCE_HINT_POOL = [
+    { en: "That's so cool!", zh: "太酷了！" },
+    { en: "Really? Tell me more!", zh: "真的吗？再说说！" },
+    { en: "I think so too!", zh: "我也这么觉得！" },
+    { en: "Wow, amazing!", zh: "哇，太棒了！" },
+    { en: "What do you like to do?", zh: "你喜欢做什么？" },
+    { en: "Me too!", zh: "我也是！" },
+    { en: "That sounds fun!", zh: "听起来很好玩！" },
+  ] as const;
+  const [showSilenceHint, setShowSilenceHint] = useState(false);
+  const [silenceHintPhrases, setSilenceHintPhrases] = useState<{ en: string; zh: string }[]>([]);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   /* exit confirmation */
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -775,19 +796,33 @@ export default function Home() {
     [highlightSpeaker, unlockAudio]
   );
 
+  /* Map speaker role to TTS voice type */
+  const speakerVoiceType = (speaker?: string): string | undefined => {
+    if (speaker === "ai_buddy") return "en_male_tim_uranus_bigtts";
+    if (speaker === "friend")   return "en_female_dacey_uranus_bigtts";
+    return undefined; // tino / user → use server-side default (TTS_VOICE_TYPE)
+  };
+
   const playTTS = useCallback(
     (text: string, speaker?: string, onPlayStart?: () => void) => {
       unlockAudio();
 
+      // English voices don't support Chinese characters — fall back to the default
+      // multilingual voice (zh_female_vv) whenever the text contains Chinese.
+      const hasChinese = /[\u4e00-\u9fff]/.test(text);
+      const voiceType = hasChinese ? undefined : speakerVoiceType(speaker);
+      // Include voiceType in cache key so different voices don't collide
+      const cacheKey = voiceType ? `${voiceType}:${text}` : text;
+
       /* Start fetching audio immediately (parallel with any running chain step).
          Check in-memory cache first to avoid redundant network calls. */
       const audioReady = (async (): Promise<AudioBuffer | null> => {
-        if (ttsCache.current.has(text)) return ttsCache.current.get(text)!;
+        if (ttsCache.current.has(cacheKey)) return ttsCache.current.get(cacheKey)!;
         try {
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({ text, voiceType }),
           });
           const data = await res.json();
           if (!data.audioBase64 || data.error) return null;
@@ -796,7 +831,7 @@ export default function Home() {
           const buffer = await ctx.decodeAudioData(
             Uint8Array.from(atob(data.audioBase64), (c) => c.charCodeAt(0)).buffer.slice(0)
           );
-          ttsCache.current.set(text, buffer);
+          ttsCache.current.set(cacheKey, buffer);
           return buffer;
         } catch {
           return null;
@@ -955,7 +990,7 @@ export default function Home() {
     (buffer: string): { completed: string[]; remaining: string } => {
       const completed: string[] = [];
       let remaining = buffer;
-      const sentenceEnd = /[。！？!?]/;
+      const sentenceEnd = /[。.]/;
 
       while (true) {
         const m = remaining.match(sentenceEnd);
@@ -1103,6 +1138,10 @@ export default function Home() {
       /* ── AI room: handle locally, no server call ── */
       if (isAiRoomRef.current) {
         addMsg("user", text);
+        icebreakerResolveRef.current?.();
+        icebreakerResolveRef.current = null;
+        clearTimeout(silenceTimerRef.current);
+        setShowSilenceHint(false);
         awardDiamonds(text);
         setTranslationPopup(null);
         try {
@@ -1158,6 +1197,10 @@ export default function Home() {
         }
         seenMsgIds.current.add(data.messageId);
         addMsg("user", text);
+        icebreakerResolveRef.current?.();
+        icebreakerResolveRef.current = null;
+        clearTimeout(silenceTimerRef.current);
+        setShowSilenceHint(false);
         awardDiamonds(text);
         setTranslationPopup(null);
       } catch {
@@ -1188,18 +1231,27 @@ export default function Home() {
           return;
         }
         setTranslationPopup({ chinese: text, english: "", words: [], voiceGuide: "", loading: true });
-        try {
+        const doTranslate = async () => {
           const res = await fetch("/api/translate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text }),
           });
           const data = await res.json();
-          const english = (data.english || "").trim();
-          const words: { word: string; phonetic: string }[] = data.words || [];
-          const voiceGuide = (data.voiceGuide || "").trim();
-          setTranslationPopup({ chinese: text, english, words, voiceGuide, loading: false });
-          if (voiceGuide) playTTS(voiceGuide, "tino");
+          return {
+            english: (data.english || "").trim(),
+            words: (data.words || []) as { word: string; phonetic: string }[],
+            voiceGuide: (data.voiceGuide || "").trim(),
+          };
+        };
+        try {
+          let result = await doTranslate();
+          // Retry once if the response is empty (API error or JSON parse failure)
+          if (!result.english && result.words.length === 0) {
+            result = await doTranslate();
+          }
+          setTranslationPopup({ chinese: text, english: result.english, words: result.words, voiceGuide: result.voiceGuide, loading: false });
+          if (result.voiceGuide) playTTS(result.voiceGuide, "tino");
         } catch {
           setTranslationPopup({ chinese: text, english: "", words: [], voiceGuide: "", loading: false });
         }
@@ -1377,11 +1429,11 @@ export default function Home() {
       return;
     }
     if (debriefDeliveredRef.current) return;
-    if (!pendingDebriefRef.current) return;
+    if (!pendingDebrief) return;
 
     debriefDeliveredRef.current = true;
-    const parts = pendingDebriefRef.current;
-    pendingDebriefRef.current = null;
+    const parts = pendingDebrief;
+    setPendingDebrief(null);
 
     const BASE_DELAY = 1200;
     const timers: ReturnType<typeof setTimeout>[] = [];
@@ -1417,7 +1469,7 @@ export default function Home() {
     });
 
     return () => timers.forEach(clearTimeout);
-  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, pendingDebrief]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ─── room: icebreaker warmup ─── */
 
@@ -1431,6 +1483,14 @@ export default function Home() {
     let cancelled = false;
     const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+    /** Wrap speakRoomSentences as a Promise so we can await it */
+    const speakAsync = (sender: MessageSender, text: string) =>
+      new Promise<void>((r) => speakRoomSentences(sender, text, r));
+
+    /** Resolves when user sends their next message (resolver stored in ref) */
+    const waitForUser = () =>
+      new Promise<void>((r) => { icebreakerResolveRef.current = r; });
+
     (async () => {
       await delay(600);
       if (cancelled) return;
@@ -1438,15 +1498,34 @@ export default function Home() {
       const myName = userName || "小朋友";
       const friendName = partnerRef.current?.name || "小伙伴";
 
-      // 简短欢迎，不强推话题，给孩子空间自由破冰
-      // setRoomReady(true) 在推第一条消息前触发，页面此时才从匹配态切换过来
       if (!cancelled) setRoomReady(true);
-      speakRoomSentences("tino", `Hi ${myName} and ${friendName}! Welcome! 快来互相打个招呼吧～`, () => {
-        if (!cancelled) setIcebreakerDone(true);
-      });
+
+      // Tino 介绍用户这边的孩子，说完后等用户开口
+      await speakAsync(
+        "tino",
+        `Hi everyone! Welcome to English Corner! I'm Tino! This is my friend ${myName}! Say hi, ${myName}!`
+      );
+      if (cancelled) return;
+
+      await waitForUser();
+      if (cancelled) return;
+
+      // AI buddy 介绍对面的小朋友
+      await speakAsync(
+        "ai_buddy",
+        `Hey! I'm ${buddyName}! And I'm here with ${friendName}! Say hi, ${friendName}! Let's all chat in English together!`
+      );
+      if (cancelled) return;
+
+      setIcebreakerDone(true);
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      /* Unblock any pending waitForUser so the async chain can exit cleanly */
+      icebreakerResolveRef.current?.();
+      icebreakerResolveRef.current = null;
+    };
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ─── room: auto-translate new messages (English → Chinese) ─── */
@@ -1486,12 +1565,92 @@ export default function Home() {
     }
   }, [mode]);
 
+  /* ─── room: silence hint — start 7 s countdown when TTS finishes ─── */
+
+  useEffect(() => {
+    if (mode !== "room") {
+      clearTimeout(silenceTimerRef.current);
+      setShowSilenceHint(false);
+      wasSpeakingRef.current = isSpeaking;
+      return;
+    }
+
+    const wasIt = wasSpeakingRef.current;
+    wasSpeakingRef.current = isSpeaking;
+
+    /* Only act on the true → false transition (TTS chain finished) */
+    if (!wasIt || isSpeaking) return;
+
+    const last = roomMsgsRef.current[roomMsgsRef.current.length - 1];
+    if (!last || last.sender === "user" || last.sender === "system") return;
+
+    clearTimeout(silenceTimerRef.current);
+    const lastContent = last.content;
+    const isIcebreaker = !icebreakerDoneRef.current;
+    silenceTimerRef.current = setTimeout(async () => {
+      if (isIcebreaker) {
+        /* Icebreaker phase: fixed greeting phrases */
+        setSilenceHintPhrases([
+          { en: "Hi! Nice to meet you!", zh: "嗨！很高兴认识你！" },
+          { en: "Hello, everyone!", zh: "大家好！" },
+        ]);
+        setShowSilenceHint(true);
+      } else {
+        /* Chat phase: fetch contextual phrases first, then show popup once */
+        const fallback = (() => {
+          const pool = [...SILENCE_HINT_POOL];
+          const idx1 = Math.floor(Math.random() * pool.length);
+          const [p1] = pool.splice(idx1, 1);
+          return [p1, pool[Math.floor(Math.random() * pool.length)]];
+        })();
+
+        let phrases = fallback;
+        try {
+          const fetchWithTimeout = Promise.race([
+            fetch("/api/suggest", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ lastMessage: lastContent }),
+            }).then((r) => r.json()),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+          ]);
+          const data = await fetchWithTimeout;
+          if (data && Array.isArray(data.suggestions) && data.suggestions.length === 2) {
+            phrases = data.suggestions;
+          }
+        } catch { /* keep fallback */ }
+
+        setSilenceHintPhrases(phrases);
+        setShowSilenceHint(true);
+      }
+    }, 7000);
+
+    return () => clearTimeout(silenceTimerRef.current);
+  }, [isSpeaking, mode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ─── silence hint: auto-play voice guide when popup appears ─── */
+
+  useEffect(() => {
+    if (!showSilenceHint || silenceHintPhrases.length === 0) return;
+    /* Small delay so the popup renders before audio starts */
+    const t = setTimeout(() => {
+      playTTS(`试试说：${silenceHintPhrases[0].en}`, "tino");
+    }, 400);
+    return () => clearTimeout(t);
+  }, [showSilenceHint]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ─── voice recording ─── */
 
   const startRecording = useCallback(async () => {
     if (!isPowered || isRecording) return;
+    /* Stop the countdown timer when user starts speaking, but keep the hint
+     * popup visible — it will dismiss once the user's message is sent. */
+    clearTimeout(silenceTimerRef.current);
     unlockAudio();
     highlightSpeaker("user");
+    /* Capture onboarding state NOW (before any async ops). By the time ASR
+     * returns the ref will already be false, so we need the snapshot. */
+    const isOnboardingRead = onboardingReadingCardRef.current;
     try {
       setRecordingError("");
       if (!window.isSecureContext) {
@@ -1547,7 +1706,7 @@ export default function Home() {
           }
           if (!text) return;
           /* onboarding reading card: skip AI reply, just let the card auto-dismiss */
-          if (onboardingReadingCardRef.current) return;
+          if (isOnboardingRead) return;
           sendMessage(text);
         } catch {
           if (modeRef.current === "room") {
@@ -1615,7 +1774,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (Array.isArray(data.parts) && data.parts.length > 0) {
-        pendingDebriefRef.current = data.parts as string[];
+        setPendingDebrief(data.parts as string[]);
       }
     } catch { /* silent */ }
   }, [userName]);
@@ -2385,11 +2544,11 @@ export default function Home() {
 
           {translationPopup && (
             <div
-              className="absolute inset-0 z-50 bg-black/25 flex items-end justify-center pb-[80px]"
+              className="absolute inset-0 z-50 bg-black/25 flex items-center justify-center px-4"
               onClick={() => setTranslationPopup(null)}
             >
               <div
-                className="bg-white rounded-[28px] w-full mx-4 shadow-2xl overflow-hidden pt-5 pb-4"
+                className="bg-white rounded-[28px] w-full shadow-2xl overflow-hidden pt-5 pb-4 max-h-[85%] overflow-y-auto"
                 onClick={(e) => e.stopPropagation()}
               >
                 {translationPopup.loading ? (
@@ -2402,6 +2561,23 @@ export default function Home() {
                   </div>
                 ) : (
                   <>
+                    {/* full sentence play button — top */}
+                    {translationPopup.english && (
+                      <div className="px-4 mb-3.5 flex justify-center">
+                        <button
+                          onClick={() => playTTS(translationPopup.english, "tino")}
+                          className="flex items-center gap-2.5 bg-[#f3eef8] active:bg-[#e8dff5] active:scale-95 transition-all rounded-2xl px-4 py-2.5"
+                        >
+                          <div className="w-7 h-7 rounded-full bg-[#7c3fa8] text-white flex items-center justify-center flex-shrink-0">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                              <polygon points="6,3 20,12 6,21" />
+                            </svg>
+                          </div>
+                          <span className="text-[14px] font-bold text-[#5a3880] leading-snug">{translationPopup.english}</span>
+                        </button>
+                      </div>
+                    )}
+
                     {/* word phonetics cards */}
                     {translationPopup.words.length > 0 && (
                       <div className="px-4 flex flex-wrap gap-2 justify-center">
@@ -2418,27 +2594,65 @@ export default function Home() {
                       </div>
                     )}
 
-                    {/* full sentence */}
-                    {translationPopup.english && (
-                      <div className="mx-4 mt-3.5 flex items-center gap-2 bg-[#f3eef8] rounded-2xl px-4 py-3">
-                        <p className="flex-1 text-[14px] font-bold text-[#5a3880] leading-snug">{translationPopup.english}</p>
-                        <button
-                          onClick={() => playTTS(translationPopup.english, "tino")}
-                          className="flex-shrink-0 w-8 h-8 rounded-full bg-[#7c3fa8]/10 text-[#7c3fa8] flex items-center justify-center active:bg-[#7c3fa8]/22 transition-colors"
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                            <polygon points="6,3 20,12 6,21" />
-                          </svg>
-                        </button>
-                      </div>
-                    )}
-
                     {/* recording hint */}
                     <div className="mt-3.5 flex justify-center">
                       <p className="text-[13px] font-bold text-[#22c55e]">按住右侧按键跟读一遍</p>
                     </div>
                   </>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* ── Silence hint popup ── */}
+          {showSilenceHint && (
+            <div
+              className="absolute inset-0 z-50 bg-black/25 flex items-center justify-center px-5"
+              onClick={() => setShowSilenceHint(false)}
+            >
+              <div
+                className="bg-white rounded-3xl shadow-xl overflow-hidden w-full"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* header */}
+                <div className="flex items-center gap-2 px-3.5 pt-3 pb-2.5">
+                  <TinoAvatar size={30} expression="happy" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[12px] font-black text-[#5a2d82] leading-none">轮到你说啦！</p>
+                    <p className="text-[9px] text-[#b090c8] leading-none mt-0.5">按住右侧按键开口说说看 🎙️</p>
+                  </div>
+                  <button
+                    onClick={() => setShowSilenceHint(false)}
+                    className="w-5 h-5 rounded-full bg-[#f0e8fa] flex items-center justify-center active:bg-[#d5bff5] transition-colors flex-shrink-0"
+                  >
+                    <svg width="7" height="7" viewBox="0 0 12 12" fill="none" stroke="#9575cd" strokeWidth="2.5" strokeLinecap="round">
+                      <path d="M1 1l10 10M11 1L1 11"/>
+                    </svg>
+                  </button>
+                </div>
+                {/* divider */}
+                <div className="mx-3.5 border-t border-[#f0e8fa]" />
+                {/* suggestion phrases */}
+                <div className="px-3.5 pt-2 pb-3 flex flex-col gap-2">
+                  <p className="text-[8px] text-[#c4a8e0] font-bold tracking-widest uppercase">你可以这样说</p>
+                  {silenceHintPhrases.map(({ en, zh }) => (
+                    <button
+                      key={en}
+                      onClick={() => playTTS(en, "tino")}
+                      className="flex items-center gap-2.5 bg-[#faf6ff] border border-[#ede0ff] rounded-xl px-3 py-2 active:bg-[#f0e6ff] active:scale-[0.98] transition-all text-left"
+                    >
+                      <div className="w-5 h-5 rounded-full bg-[#7c3fa8] flex items-center justify-center flex-shrink-0">
+                        <svg width="6" height="6" viewBox="0 0 24 24" fill="white">
+                          <polygon points="6,3 20,12 6,21"/>
+                        </svg>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-[13px] font-black text-[#1e1218] leading-tight">{en}</p>
+                        <p className="text-[10px] text-[#b090c8] leading-none mt-0.5">{zh}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
