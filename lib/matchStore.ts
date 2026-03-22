@@ -28,6 +28,8 @@ export type Room = {
   createdAt: number;
   tinoGenerating: boolean;
   lastTinoAt: number;
+  /** 上次冷场引导时间，用于节流 */
+  lastSilenceNudgeAt?: number;
 };
 
 type MatchStoreState = {

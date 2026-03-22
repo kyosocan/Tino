@@ -14,6 +14,7 @@ import type {
   RoomPartner,
   MessageSender,
 } from "@/lib/types";
+import { OUTFITS, getOutfit, type OutfitDef } from "@/lib/incentive";
 
 /* ───────── constants ───────── */
 
@@ -76,12 +77,33 @@ const ONBOARDING_STEPS = [
 ];
 
 const ROOM_DURATION = 300;
+/** 聊天室：一方久未接话后，Tino 冷场引导 */
+const ROOM_SILENCE_MS = 25_000;
+const ROOM_SILENCE_POLL_MS = 5000;
 
 
 function formatRoomTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function formatFriendLastChatTime(timestamp: number): string {
+  if (!timestamp) return "最近";
+  const diff = Date.now() - timestamp;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (diff < 10 * minute) return "刚刚";
+  if (diff < hour) return `${Math.max(1, Math.floor(diff / minute))} 分钟前`;
+  if (diff < day) return `${Math.max(1, Math.floor(diff / hour))} 小时前`;
+  if (diff < 7 * day) return `${Math.max(1, Math.floor(diff / day))} 天前`;
+
+  const d = new Date(timestamp);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${mm}/${dd} 聊过`;
 }
 
 const GLOW: Record<string, string> = {
@@ -104,6 +126,23 @@ type CompanionMemory = {
 
 function containsChinese(text: string): boolean {
   return /[\u4e00-\u9fa5]/.test(text);
+}
+
+/** 聊天室用户发言：道别/不想聊了，或主动要加好友 → 弹出加好友确认（与结束时同一套逻辑） */
+function detectRoomFriendInviteTrigger(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  if (
+    /再见|拜拜|回见|不聊了|不想聊|先下了|先这样|下次(再)?聊|不玩了|我走啦|溜了|先撤|有缘再会|下次见|有空再聊|先走|下线|886|拜拜啦|再见啦|先不聊|先告辞|告辞了|不打扰了|不聊啦|先撤了|撤了|晚安啦|晚安|see\s*you|talk\s*later|bye\b|goodbye|gotta\s*go|\bgtg\b/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/加好友|加你好友|加个好友|加一下好友|想加你|我们加好友|做个朋友|交个朋友|加个联系人|add\s*(me\s*)?as\s*(a\s*)?friend|be\s*friends|let'?s\s*be\s*friends|friend\s*me|add\s*friend/i.test(t)) {
+    return true;
+  }
+  return false;
 }
 
 /** 中文与英文发音相同/极相近的常用词，直接采用英文，不弹翻译框、不要求用户再说英文 */
@@ -392,18 +431,6 @@ function extractPromptHeadline(line: string): string {
     .trim();
 }
 
-/* ───────── avatar frames ───────── */
-
-const FRAMES = [
-  { id: "none", name: "默认", price: 0, style: {} as React.CSSProperties },
-  { id: "gold", name: "金色光环", price: 30, style: { border: "3px solid #FFD700", boxShadow: "0 0 8px rgba(255,215,0,0.6)" } as React.CSSProperties },
-  { id: "ice", name: "冰晶之环", price: 40, style: { border: "3px solid #87CEEB", boxShadow: "0 0 10px rgba(135,206,235,0.7)" } as React.CSSProperties },
-  { id: "nature", name: "自然之力", price: 50, style: { border: "3px solid #3CB371", boxShadow: "0 0 8px rgba(60,179,113,0.6)" } as React.CSSProperties },
-  { id: "fire", name: "烈焰之环", price: 80, style: { border: "3px solid #FF4500", boxShadow: "0 0 10px rgba(255,69,0,0.7)" } as React.CSSProperties },
-  { id: "star", name: "星光闪耀", price: 100, style: { border: "3px solid #9370DB", boxShadow: "0 0 12px rgba(147,112,219,0.8)" } as React.CSSProperties },
-  { id: "rainbow", name: "彩虹幻境", price: 150, style: { border: "3px solid #ff6b6b", boxShadow: "0 0 12px rgba(255,107,107,0.5), 0 0 24px rgba(107,181,255,0.3)" } as React.CSSProperties },
-];
-
 /* ───────── component ───────── */
 
 export default function Home() {
@@ -435,6 +462,10 @@ export default function Home() {
   const [roomMsgs, setRoomMsgs] = useState<Message[]>([]);
   const [turnCount, setTurnCount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
+  const isLoadingRef = useRef(false);
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
   const companionMemoryRef = useRef<CompanionMemory>(createEmptyCompanionMemory());
 
   /* splash / app ready */
@@ -500,6 +531,11 @@ export default function Home() {
   const roomMsgsRef = useRef<Message[]>([]);
   useEffect(() => { roomMsgsRef.current = roomMsgs; }, [roomMsgs]);
 
+  const roomSilenceTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  /** 已对某条「最后非 Tino 的用户/同伴消息」做过冷场引导 */
+  const roomSilenceBasisMsgIdRef = useRef<string | null>(null);
+  const roomSilenceInFlightRef = useRef(false);
+
   /* translation popup */
 
   /* exit confirmation */
@@ -515,9 +551,22 @@ export default function Home() {
   type FriendRecord = { name: string; grade: number; lastChatAt: number };
   const [friendsList, setFriendsList] = useState<FriendRecord[]>([]);
   const [showFriendsList, setShowFriendsList] = useState(false);
-  const [showAddFriend, setShowAddFriend] = useState(false);
-  type CallingFriend = { name: string; emoji: string; avatarColor: string };
-  const [callingFriend, setCallingFriend] = useState<CallingFriend | null>(null);
+  /** 聊天结束或用户说「再见/加好友」等时询问是否加好友（含 AI 替补房） */
+  const [friendInvitePartner, setFriendInvitePartner] = useState<RoomPartner | null>(
+    null
+  );
+  /** 本局是否已弹出过加好友（避免道别 + 退出房间连弹两次） */
+  const friendInvitePromptShownRef = useRef(false);
+  /** 好友语音留言：独立轻量流程（录音→识别→本地展示），不进语音房 */
+  type FriendVoiceMemo = { name: string; grade: number; emoji: string; avatarColor: string };
+  const [friendVoiceMemo, setFriendVoiceMemo] = useState<FriendVoiceMemo | null>(null);
+  const [friendVoiceMemoResult, setFriendVoiceMemoResult] = useState<string | null>(null);
+  const friendVoiceMemoRef = useRef<{ name: string; grade: number } | null>(null);
+  useEffect(() => {
+    friendVoiceMemoRef.current = friendVoiceMemo
+      ? { name: friendVoiceMemo.name, grade: friendVoiceMemo.grade }
+      : null;
+  }, [friendVoiceMemo]);
 
   /* drift bottle */
   type BottleSubState =
@@ -558,20 +607,27 @@ export default function Home() {
   const [bottleLoading, setBottleLoading] = useState(false);
   const [bottleInboxUnread, setBottleInboxUnread] = useState(0);
 
-  /* diamonds / frames */
+  /* 积分 + 装扮 */
   const [diamonds, setDiamonds] = useState(0);
   const [diamondDelta, setDiamondDelta] = useState<number | null>(null);
-  const [ownedFrames, setOwnedFrames] = useState<string[]>(["none"]);
-  const [activeFrame, setActiveFrame] = useState("none");
+  /** 每次加积分 +1，用于重播轻提示动画 */
+  const [pointsHintKey, setPointsHintKey] = useState(0);
+  const [ownedOutfits, setOwnedOutfits] = useState<string[]>(["default"]);
+  const [activeOutfit, setActiveOutfit] = useState("default");
 
   useEffect(() => {
     try {
       const d = localStorage.getItem("tino_diamonds");
       if (d) setDiamonds(Number(d));
-      const o = localStorage.getItem("tino_owned_frames");
-      if (o) setOwnedFrames(JSON.parse(o));
-      const a = localStorage.getItem("tino_active_frame");
-      if (a) setActiveFrame(a);
+      const oo = localStorage.getItem("tino_owned_outfits");
+      if (oo) {
+        try {
+          const parsed = JSON.parse(oo) as string[];
+          if (Array.isArray(parsed) && parsed.length > 0) setOwnedOutfits(parsed);
+        } catch { /* ignore */ }
+      }
+      const ao = localStorage.getItem("tino_active_outfit");
+      if (ao) setActiveOutfit(ao);
       const fl = localStorage.getItem("tino_friends_list");
       if (fl) setFriendsList(JSON.parse(fl));
 
@@ -649,15 +705,15 @@ export default function Home() {
     try { localStorage.setItem("tino_diamonds", String(diamonds)); } catch {}
   }, [diamonds]);
   useEffect(() => {
-    try { localStorage.setItem("tino_owned_frames", JSON.stringify(ownedFrames)); } catch {}
-  }, [ownedFrames]);
+    try { localStorage.setItem("tino_owned_outfits", JSON.stringify(ownedOutfits)); } catch {}
+  }, [ownedOutfits]);
   useEffect(() => {
-    try { localStorage.setItem("tino_active_frame", activeFrame); } catch {}
-  }, [activeFrame]);
+    try { localStorage.setItem("tino_active_outfit", activeOutfit); } catch {}
+  }, [activeOutfit]);
 
   useEffect(() => {
     if (diamondDelta === null) return;
-    const t = setTimeout(() => setDiamondDelta(null), 1200);
+    const t = setTimeout(() => setDiamondDelta(null), 1320);
     return () => clearTimeout(t);
   }, [diamondDelta]);
 
@@ -669,18 +725,22 @@ export default function Home() {
       } else {
         setDiamonds((d) => d + pts);
       }
+      setPointsHintKey((k) => k + 1);
       setDiamondDelta(pts);
     }
   }, []);
 
-  const buyFrame = useCallback((frame: typeof FRAMES[number]) => {
-    if (diamonds < frame.price || ownedFrames.includes(frame.id)) return;
-    setDiamonds((d) => d - frame.price);
-    setOwnedFrames((prev) => [...prev, frame.id]);
-    setActiveFrame(frame.id);
-  }, [diamonds, ownedFrames]);
+  const buyOutfit = useCallback(
+    (o: OutfitDef) => {
+      if (diamonds < o.price || ownedOutfits.includes(o.id)) return;
+      setDiamonds((d) => d - o.price);
+      setOwnedOutfits((prev) => [...prev, o.id]);
+      setActiveOutfit(o.id);
+    },
+    [diamonds, ownedOutfits]
+  );
 
-  const userFrameStyle = FRAMES.find((f) => f.id === activeFrame)?.style || {};
+  const activeOutfitDef = getOutfit(activeOutfit);
 
   /* active speaker highlight */
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
@@ -1117,6 +1177,16 @@ export default function Home() {
     ]
   );
 
+  const maybePromptFriendInviteFromUserText = useCallback((text: string) => {
+    if (endedRef.current) return;
+    if (friendInvitePromptShownRef.current) return;
+    const p = partnerRef.current;
+    if (!p) return;
+    if (!detectRoomFriendInviteTrigger(text)) return;
+    friendInvitePromptShownRef.current = true;
+    setFriendInvitePartner({ ...p });
+  }, []);
+
   /* ─── room: send message to server (or AI partner) ─── */
 
   const sendRoom = useCallback(
@@ -1206,6 +1276,7 @@ export default function Home() {
       text: string,
       audioPayload?: { audioBase64?: string; mimeType?: string }
     ) => {
+      maybePromptFriendInviteFromUserText(text);
       if (containsChinese(text)) {
         const englishSame = getEnglishIfSamePronunciation(text);
         if (englishSame != null) {
@@ -1240,7 +1311,7 @@ export default function Home() {
         mimeType: audioPayload?.mimeType,
       });
     },
-    [sendRoom]
+    [sendRoom, maybePromptFriendInviteFromUserText]
   );
 
   const sendMessage = useCallback(
@@ -1311,6 +1382,109 @@ export default function Home() {
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     };
   }, [mode, roomId, userId, isAiRoom, addMsg, playAudioBase64, playTTS, speakRoomSentences]);
+
+  /* ─── room: 冷场时 Tino 引导下一方发言（真人房由「该接话的一方」客户端请求，避免重复） ─── */
+
+  useEffect(() => {
+    roomSilenceBasisMsgIdRef.current = null;
+  }, [roomId]);
+
+  useEffect(() => {
+    if (mode !== "room") {
+      if (roomSilenceTimerRef.current) {
+        clearInterval(roomSilenceTimerRef.current);
+        roomSilenceTimerRef.current = undefined;
+      }
+      return;
+    }
+
+    const tick = () => {
+      if (
+        endedRef.current ||
+        modeRef.current !== "room" ||
+        roomSilenceInFlightRef.current
+      ) {
+        return;
+      }
+      const msgs = roomMsgsRef.current.filter((m) => m.sender !== "system");
+      if (msgs.length === 0) return;
+
+      const lastNonTino = [...msgs].reverse().find((m) => m.sender !== "tino");
+      if (!lastNonTino) return;
+      if (Date.now() - lastNonTino.timestamp < ROOM_SILENCE_MS) return;
+      if (roomSilenceBasisMsgIdRef.current === lastNonTino.id) return;
+
+      const ai = isAiRoomRef.current;
+      if (!ai) {
+        if (lastNonTino.sender !== "friend") return;
+      } else if (lastNonTino.sender === "user" && isLoadingRef.current) {
+        return;
+      }
+
+      void (async () => {
+        roomSilenceInFlightRef.current = true;
+        try {
+          if (isAiRoomRef.current) {
+            const nudgeTarget =
+              lastNonTino.sender === "user" ? "peer" : "self";
+            const partnerName = partnerRef.current?.name || "小伙伴";
+            const myName = userName || "小朋友";
+            const recentContext = roomMsgsRef.current
+              .filter((m) => m.sender !== "system")
+              .slice(-10)
+              .map((m) =>
+                `${m.sender === "user" ? myName : partnerName}: ${m.content}`
+              )
+              .join("\n");
+            const res = await fetch("/api/room", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "silence_nudge",
+                recentContext,
+                nudgeTarget,
+                partnerName,
+                selfName: myName,
+              }),
+            });
+            const data = await res.json();
+            const reply: string = data.reply || "";
+            if (!reply.trim()) return;
+            roomSilenceBasisMsgIdRef.current = lastNonTino.id;
+            speakRoomSentences("tino", reply);
+          } else {
+            const rid = roomId;
+            const uid = userId;
+            if (!rid || !uid) return;
+            const res = await fetch("/api/room-chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "silence_nudge",
+                roomId: rid,
+                userId: uid,
+              }),
+            });
+            const data = await res.json();
+            if (data.ok) roomSilenceBasisMsgIdRef.current = lastNonTino.id;
+          }
+        } catch {
+          /* ignore */
+        } finally {
+          roomSilenceInFlightRef.current = false;
+        }
+      })();
+    };
+
+    roomSilenceTimerRef.current = setInterval(tick, ROOM_SILENCE_POLL_MS);
+    tick();
+    return () => {
+      if (roomSilenceTimerRef.current) {
+        clearInterval(roomSilenceTimerRef.current);
+        roomSilenceTimerRef.current = undefined;
+      }
+    };
+  }, [mode, roomId, userId, userName, isAiRoom, speakRoomSentences]);
 
   /* ─── companion: first-visit onboarding sequence ─── */
 
@@ -1594,11 +1768,31 @@ export default function Home() {
             });
             return;
           }
+          if (modeRef.current === "companion" && friendVoiceMemoRef.current) {
+            const target = friendVoiceMemoRef.current;
+            setFriendVoiceMemoResult(text.trim() || "…");
+            setFriendsList((prev) => {
+              const next = prev.map((f) =>
+                f.name === target.name ? { ...f, lastChatAt: Date.now() } : f
+              );
+              try {
+                localStorage.setItem("tino_friends_list", JSON.stringify(next));
+              } catch {
+                /* ignore */
+              }
+              return next;
+            });
+            return;
+          }
           if (!text) return;
           /* onboarding reading card: skip AI reply, just let the card auto-dismiss */
           if (onboardingReadingCardRef.current) return;
           sendMessage(text);
         } catch {
+          if (modeRef.current === "companion" && friendVoiceMemoRef.current) {
+            setFriendVoiceMemoResult("没听清，再试一次");
+            return;
+          }
           if (modeRef.current === "room") {
             await sendRoom({
               text: "Voice message",
@@ -1670,6 +1864,11 @@ export default function Home() {
   }, [userName]);
 
   const leaveRoom = useCallback(() => {
+    const invite =
+      partnerRef.current && !friendInvitePromptShownRef.current
+        ? { ...partnerRef.current }
+        : null;
+
     endedRef.current = true;
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     setDiamonds((d) => d + sessionDiamonds);
@@ -1691,13 +1890,18 @@ export default function Home() {
     setIcebreakerDone(false);
     setRoomReady(false);
     setAiBuddyName("");
-    setShowAddFriend(false);
+    setMatchingPhase("waiting");
 
     notifyMatchLeave(userId);
+    if (invite) {
+      friendInvitePromptShownRef.current = true;
+      setFriendInvitePartner(invite);
+    }
   }, [notifyMatchLeave, sessionDiamonds, userId, fetchDebrief]);
 
   const enterRoom = useCallback(
     async (rid: string, p: RoomPartner) => {
+      setMatchingPhase("ai_found");
       setRoomId(rid);
       setPartner(p);
       setRoomMsgs([]);
@@ -1709,15 +1913,7 @@ export default function Home() {
       setSessionDiamonds(0);
       seenMsgIds.current.clear();
       lastPollTimeRef.current = 0;
-
-      try {
-        const raw = localStorage.getItem("tino_friends_list");
-        const existing: { name: string; grade: number; lastChatAt: number }[] = raw ? JSON.parse(raw) : [];
-        const filtered = existing.filter((f) => f.name !== p.name || f.grade !== p.grade);
-        const updated = [{ name: p.name, grade: p.grade, lastChatAt: Date.now() }, ...filtered].slice(0, 20);
-        localStorage.setItem("tino_friends_list", JSON.stringify(updated));
-        setFriendsList(updated);
-      } catch { /* storage unavailable */ }
+      friendInvitePromptShownRef.current = false;
 
       /* Pre-fetch the welcome TTS so the room view can play it instantly */
       const myName = userName || "小朋友";
@@ -1737,7 +1933,6 @@ export default function Home() {
     const aiPartner: RoomPartner = { userId: "ai_partner", name, grade: 0 };
     setMatchingPhase("ai_found");
     setTimeout(async () => {
-      setMatchingPhase("waiting");
       setIsAiRoom(true);
       isAiRoomRef.current = true;
       setRoomId("ai_room");
@@ -1751,6 +1946,7 @@ export default function Home() {
       setSessionDiamonds(0);
       seenMsgIds.current.clear();
       lastPollTimeRef.current = 0;
+      friendInvitePromptShownRef.current = false;
 
       /* Pre-fetch the welcome TTS so the room view can play it instantly */
       const myName = userName || "小朋友";
@@ -1762,7 +1958,9 @@ export default function Home() {
   }, [userName, prefetchTTS]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startMatch = useCallback(async () => {
+    if (friendVoiceMemoRef.current) return;
     unlockAudio();
+    setMatchingPhase("waiting");
     setMode("matching");
 
     /* after 10s with no real match → arrange an AI partner */
@@ -1787,6 +1985,7 @@ export default function Home() {
 
       if (data.matched && data.roomId && data.partner) {
         clearTimeout(matchTimeoutRef.current);
+        setMatchingPhase("ai_found");
         setTimeout(() => enterRoom(data.roomId, data.partner), 1500);
         return;
       }
@@ -1802,12 +2001,14 @@ export default function Home() {
           if (d.matched && d.roomId && d.partner) {
             clearTimeout(matchTimeoutRef.current);
             if (matchPollRef.current) clearInterval(matchPollRef.current);
+            setMatchingPhase("ai_found");
             enterRoom(d.roomId, d.partner);
           }
         } catch { /* retry */ }
       }, 1500);
     } catch {
       clearTimeout(matchTimeoutRef.current);
+      setMatchingPhase("waiting");
       setMode("companion");
     }
   }, [unlockAudio, userId, userName, userGrade, enterRoom, enterAiRoom, notifyMatchLeave]);
@@ -1816,6 +2017,7 @@ export default function Home() {
     if (matchPollRef.current) clearInterval(matchPollRef.current);
     if (matchTimeoutRef.current) clearTimeout(matchTimeoutRef.current);
     notifyMatchLeave(userId);
+    setMatchingPhase("waiting");
     setMode("companion");
   }, [notifyMatchLeave, userId]);
 
@@ -1842,6 +2044,7 @@ export default function Home() {
 
     const onMotion = (e: DeviceMotionEvent) => {
       if (modeRef.current !== "companion" || shakeCooldownRef.current) return;
+      if (friendVoiceMemoRef.current) return;
 
       /* 优先使用去重力的 acceleration，回退到 accelerationIncludingGravity */
       const acc = e.acceleration ?? e.accelerationIncludingGravity;
@@ -1877,31 +2080,6 @@ export default function Home() {
     return () => window.removeEventListener("devicemotion", onMotion);
   }, [isPowered, startMatch]);
 
-  /* ─── calling screen: enter AI room after 3s using friend's name ─── */
-
-  useEffect(() => {
-    if (!callingFriend) return;
-    const t = setTimeout(() => {
-      const aiPartner: RoomPartner = { userId: "ai_partner", name: callingFriend.name, grade: 0 };
-      setCallingFriend(null);
-      setIsAiRoom(true);
-      isAiRoomRef.current = true;
-      setRoomId("ai_room");
-      setPartner(aiPartner);
-      setRoomMsgs([]);
-      setTimeLeft(ROOM_DURATION);
-      setEnglishCount(0);
-      endedRef.current = false;
-      setActiveSpeaker(null);
-      setRoomDisplay(null);
-      setSessionDiamonds(0);
-      seenMsgIds.current.clear();
-      lastPollTimeRef.current = 0;
-      setMode("room");
-    }, 3000);
-    return () => clearTimeout(t);
-  }, [callingFriend]); // eslint-disable-line react-hooks/exhaustive-deps
-
   /* ─── room lifecycle ─── */
 
   useEffect(() => {
@@ -1929,6 +2107,10 @@ export default function Home() {
     const snapshot = roomMsgsRef.current;
     fetchDebrief(snapshot).finally(() => {
       setTimeout(() => {
+        const invite =
+          partnerRef.current && !friendInvitePromptShownRef.current
+            ? { ...partnerRef.current }
+            : null;
         if (pollTimerRef.current) clearInterval(pollTimerRef.current);
         setMode("companion");
         setPartner(null);
@@ -1940,7 +2122,11 @@ export default function Home() {
         setIcebreakerDone(false);
         setRoomReady(false);
         setAiBuddyName("");
-        setShowAddFriend(false);
+        setMatchingPhase("waiting");
+        if (invite) {
+          friendInvitePromptShownRef.current = true;
+          setFriendInvitePartner(invite);
+        }
       }, 3500);
     });
   }, [mode, timeLeft, addMsg, sessionDiamonds, fetchDebrief]);
@@ -2166,6 +2352,62 @@ export default function Home() {
       isRecording={isRecording}
       isSpeaking={isSpeaking}
     >
+      <div className="h-full min-h-0 relative">
+      {friendInvitePartner && (
+        <div
+          className="absolute inset-0 z-[200] bg-black/70 flex items-center justify-center px-2"
+          onClick={() => setFriendInvitePartner(null)}
+        >
+          <div
+            className="w-full max-w-[168px] rounded-xl border-2 border-[#c9b8c4] bg-[#ebe4e8] p-2.5 flex flex-col gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 min-h-0">
+              <div className="w-9 h-9 shrink-0 rounded-lg bg-gradient-to-br from-[#f0a8c8] to-[#a890d8] flex items-center justify-center text-sm font-black text-white shadow-inner">
+                {friendInvitePartner.name[0]}
+              </div>
+              <div className="min-w-0 flex-1 leading-tight">
+                <p className="text-[13px] font-black text-[#1a1014] truncate">
+                  {friendInvitePartner.name}
+                </p>
+                <p className="text-[10px] font-bold text-[#6a5864] mt-0.5">加为好友？</p>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <button
+                type="button"
+                onClick={() => setFriendInvitePartner(null)}
+                className="w-full py-1.5 rounded-lg bg-[#d4cad0] text-[#4a3d44] text-[11px] font-bold active:brightness-95 border border-[#b8aab2]"
+              >
+                不要
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    const raw = localStorage.getItem("tino_friends_list");
+                    const existing: FriendRecord[] = raw ? JSON.parse(raw) : [];
+                    const p = friendInvitePartner;
+                    const filtered = existing.filter(
+                      (f) => f.name !== p.name || f.grade !== p.grade
+                    );
+                    const updated = [
+                      { name: p.name, grade: p.grade, lastChatAt: Date.now() },
+                      ...filtered,
+                    ].slice(0, 20);
+                    localStorage.setItem("tino_friends_list", JSON.stringify(updated));
+                    setFriendsList(updated);
+                  } catch { /* storage unavailable */ }
+                  setFriendInvitePartner(null);
+                }}
+                className="w-full py-2.5 rounded-lg bg-[#6b2f9a] text-white text-[12px] font-black active:brightness-95 border border-[#4a2068]"
+              >
+                加好友
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {!isAppReady ? (
         /* ── splash screen ── */
         <div
@@ -2208,10 +2450,10 @@ export default function Home() {
           <TinoAvatar size={48} expression="happy" className="opacity-10" />
         </div>
       ) : (mode === "matching" || (mode === "room" && !roomReady)) ? (
-        /* ── matching animation (also shown while room TTS is loading) ── */
+        /* ── matching：寻找中 / 已匹配（进房等破冰；好友「留言」进房会直接 roomReady，不经此屏） ── */
         <div className="h-full bg-gradient-to-b from-tino-orange/80 to-tino-blue/60 flex flex-col items-center justify-center gap-4 text-white text-center px-4">
-          {matchingPhase === "ai_found" ? (
-            /* partner found transition */
+          {matchingPhase === "ai_found" || (mode === "room" && !roomReady) ? (
+            /* partner found：预拉 TTS / 破冰前也保持此屏 */
             <>
               <p className="text-lg font-bold animate-pulse-soft">找到小伙伴了！</p>
               <p className="text-sm opacity-80">马上开始聊天～</p>
@@ -2255,92 +2497,146 @@ export default function Home() {
 
           {/* Friends list overlay */}
           {showFriendsList && (
-            <div className="absolute inset-0 z-40 flex flex-col bg-[#f5eef8]">
-              <div className="flex items-center justify-between px-4 pt-5 pb-3 flex-shrink-0">
-                <button
-                  onClick={() => setShowFriendsList(false)}
-                  className="flex items-center gap-1.5 text-[#5b3f72] active:opacity-60 transition-opacity"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M19 12H5M12 5l-7 7 7 7"/>
-                  </svg>
-                  <span className="text-sm font-bold">我的好友</span>
-                </button>
-                {friendsList.length > 0 && (
-                  <span className="text-[11px] font-semibold text-[#9b72c8] bg-[#e8d8f8] px-2.5 py-1 rounded-full">
-                    {friendsList.length} 位好友
-                  </span>
-                )}
+            <div className="absolute inset-0 z-40 flex flex-col bg-gradient-to-b from-[#f9f4ff] via-[#fdfbff] to-[#f7f1ff]">
+              <div className="px-3 pt-3 pb-2 flex-shrink-0 border-b border-[#eee3fb]">
+                <div className="flex items-center gap-2 min-w-0">
+                  <button
+                    onClick={() => {
+                      setFriendVoiceMemo(null);
+                      setFriendVoiceMemoResult(null);
+                      setShowFriendsList(false);
+                    }}
+                    className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-[#6a4d90] bg-white border border-[#e8dcf7] shadow-[0_1px_4px_rgba(115,72,170,0.12)] active:scale-95 transition-transform"
+                    aria-label="返回"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M19 12H5M12 5l-7 7 7 7"/>
+                    </svg>
+                  </button>
+                  <h2 className="min-w-0 flex-1 text-[15px] leading-tight font-black tracking-tight text-[#4f2f75] truncate">
+                    我的好友
+                    {friendsList.length > 0 ? (
+                      <span className="font-bold text-[#9f86be]"> · {friendsList.length} 位</span>
+                    ) : null}
+                  </h2>
+                </div>
               </div>
               {friendsList.length === 0 ? (
-                <div className="flex-1 flex flex-col items-center justify-center gap-3">
-                  <div className="text-5xl">🐾</div>
-                  <p className="text-sm font-bold text-[#c4a0b0]">还没有好友</p>
-                  <p className="text-[11px] text-[#d4b8c8] text-center px-8">
+                <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6">
+                  <div className="w-16 h-16 rounded-2xl bg-white border border-[#ecdef6] shadow-[0_8px_20px_rgba(155,121,196,0.12)] flex items-center justify-center text-4xl">
+                    🐾
+                  </div>
+                  <p className="text-[15px] font-black text-[#8b6aae]">还没有好友</p>
+                  <p className="text-[12px] text-[#b69acb] text-center leading-relaxed">
                     和小伙伴匹配聊天后<br/>他们会出现在这里
                   </p>
                 </div>
               ) : (
-                <div className="flex-1 overflow-y-auto px-3 pb-4 flex flex-col gap-2">
-                  {friendsList.map((f, i) => {
+                <div className="flex-1 overflow-y-auto px-3 pt-2 pb-5 flex flex-col gap-2 min-w-0">
+                  {friendsList
+                    .slice()
+                    .sort((a, b) => b.lastChatAt - a.lastChatAt)
+                    .map((f, i) => {
                     const AVATARS = ["🐰","🐯","🐻","🦊","🐼","🐨","🐸","🦁","🐮","🐷","🐧","🦆","🐺","🦋","🐙"];
                     let hash = 0;
                     for (let c = 0; c < f.name.length; c++) hash = (hash * 31 + f.name.charCodeAt(c)) & 0xffff;
                     const emoji = AVATARS[hash % AVATARS.length];
                     const AVATAR_COLORS = ["bg-[#e8d4f0]","bg-[#fde8c8]","bg-[#d4eef8]","bg-[#fde8e8]","bg-[#d8f0e4]"];
                     const avatarColor = AVATAR_COLORS[hash % AVATAR_COLORS.length];
-                    const minutesAgo = Math.floor((Date.now() - f.lastChatAt) / 60000);
-                    const timeLabel =
-                      minutesAgo < 1 ? "刚刚" :
-                      minutesAgo < 60 ? `${minutesAgo} 分钟前` :
-                      minutesAgo < 1440 ? `${Math.floor(minutesAgo / 60)} 小时前` :
-                      `${Math.floor(minutesAgo / 1440)} 天前`;
-                    const isRecent = minutesAgo < 10;
+                    const gradeLabel = f.grade > 0 ? `${f.grade} 年级` : "小伙伴";
                     return (
-                      <div key={i} className="flex items-center gap-3 bg-white rounded-2xl px-3 py-3 shadow-sm">
-                        <div className="relative flex-shrink-0">
-                          <div className={`w-11 h-11 rounded-full ${avatarColor} flex items-center justify-center text-2xl`}>{emoji}</div>
-                          {isRecent && <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-[#4cd964] border-2 border-white" />}
+                      <div key={i} className="flex items-center gap-2 min-w-0 bg-white rounded-2xl px-2.5 py-2 border border-[#ecdef8] shadow-[0_4px_12px_rgba(150,120,186,0.09)]">
+                        <div className={`w-11 h-11 shrink-0 rounded-xl ${avatarColor} flex items-center justify-center text-[22px] leading-none border border-white`}>
+                          {emoji}
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-[13px] font-bold text-[#1e1218] truncate">{f.name}</p>
-                          <p className="text-[10px] text-[#b0a0b8] mt-0.5">{timeLabel} 聊过</p>
+                        <div className="flex-1 min-w-0 overflow-hidden">
+                          <p className="text-[14px] font-black text-[#231628] leading-snug truncate">{f.name}</p>
+                          <p className="text-[10px] font-semibold text-[#9c84b7] mt-0.5 leading-snug truncate">
+                            {gradeLabel} · {formatFriendLastChatTime(f.lastChatAt)}
+                          </p>
                         </div>
                         <button
-                          onClick={() => { setShowFriendsList(false); setCallingFriend({ name: f.name, emoji, avatarColor }); }}
-                          className="flex items-center gap-1 bg-[#e8f8ee] text-[#3aad5e] text-[11px] font-bold px-2.5 py-1.5 rounded-xl active:bg-[#d4f0e0] transition-colors"
+                          type="button"
+                          onClick={() => {
+                            setFriendVoiceMemoResult(null);
+                            setFriendVoiceMemo({
+                              name: f.name,
+                              grade: f.grade,
+                              emoji,
+                              avatarColor,
+                            });
+                          }}
+                          className="shrink-0 flex items-center gap-1 pl-2 pr-2.5 py-1.5 bg-[#f1e6ff] text-[#6b4a9a] rounded-xl border border-[#d6c2f0] active:brightness-95 transition-colors"
+                          aria-label="给好友留言"
+                          title="给好友留言"
                         >
-                          呼叫
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.71 3.47 2 2 0 0 1 3.69 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.91a16 16 0 0 0 6 6l1.01-1.01a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 21.73 16.92z"/>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="shrink-0">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                            <line x1="12" y1="19" x2="12" y2="23"/>
+                            <line x1="8" y1="23" x2="16" y2="23"/>
                           </svg>
+                          <span className="text-[11px] font-black leading-none whitespace-nowrap">留言</span>
                         </button>
                       </div>
                     );
                   })}
                 </div>
               )}
-            </div>
-          )}
-
-          {/* Calling overlay */}
-          {callingFriend && (
-            <div className="absolute inset-0 z-50 bg-[#fdf0f8] flex flex-col items-center justify-center gap-5">
-              <div className={`w-20 h-20 rounded-full ${callingFriend.avatarColor} flex items-center justify-center text-4xl shadow-md`}>
-                {callingFriend.emoji}
-              </div>
-              <div className="text-center">
-                <p className="text-[17px] font-black text-[#1e1218]">{callingFriend.name}</p>
-                <p className="text-[12px] text-[#b0a0b8] mt-1 animate-pulse">正在呼叫... Calling...</p>
-              </div>
-              <button
-                onClick={() => setCallingFriend(null)}
-                className="w-12 h-12 rounded-full bg-[#ff4d4d] flex items-center justify-center shadow-lg active:scale-90 transition-transform"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round">
-                  <path d="M18 6L6 18M6 6l12 12"/>
-                </svg>
-              </button>
+              {/* 留言：小弹窗引导按住说话 */}
+              {friendVoiceMemo && (
+                <div
+                  className="absolute inset-0 z-50 flex items-center justify-center px-4 bg-black/25"
+                  onClick={() => {
+                    setFriendVoiceMemo(null);
+                    setFriendVoiceMemoResult(null);
+                  }}
+                >
+                  <div
+                    className="relative w-full max-w-[min(280px,92vw)] rounded-2xl bg-white border border-[#e8dcf7] shadow-[0_8px_28px_rgba(80,50,120,0.18)] px-4 pt-3 pb-4"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFriendVoiceMemo(null);
+                        setFriendVoiceMemoResult(null);
+                      }}
+                      className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center text-[#b8a8bc] text-lg leading-none hover:bg-[#f5f0fb] active:bg-[#ede5f7]"
+                      aria-label="关闭"
+                    >
+                      ×
+                    </button>
+                    <div className="flex items-center gap-2 pr-6 mb-3">
+                      <div className={`w-10 h-10 shrink-0 rounded-xl ${friendVoiceMemo.avatarColor} flex items-center justify-center text-xl border border-white`}>
+                        {friendVoiceMemo.emoji}
+                      </div>
+                      <p className="text-[14px] font-black text-[#4f2f75] truncate">给 {friendVoiceMemo.name}</p>
+                    </div>
+                    {!friendVoiceMemoResult ? (
+                      <p className="text-[13px] text-[#6a5864] text-center font-semibold leading-relaxed">
+                        按住右侧键说话
+                      </p>
+                    ) : (
+                      <div className="space-y-3">
+                        <p className="text-[14px] font-bold text-[#231628] leading-snug whitespace-pre-wrap break-words max-h-[120px] overflow-y-auto">
+                          {friendVoiceMemoResult}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFriendVoiceMemo(null);
+                            setFriendVoiceMemoResult(null);
+                          }}
+                          className="w-full py-2 rounded-xl bg-[#8c64b8] text-white text-[13px] font-black active:scale-[0.98]"
+                        >
+                          好的
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2397,13 +2693,30 @@ export default function Home() {
             />
           </div>
 
+          {/* 摇一摇 — 人物左侧，图标按钮（与好友按钮同尺寸） */}
+          <div className="absolute left-1.5 top-[30%] z-20 -translate-y-1/2 pointer-events-auto">
+            <button
+              type="button"
+              onClick={startMatch}
+              className="w-8 h-8 rounded-full bg-white/90 border border-[#ecc8d8] shadow-md text-[#c4628a] flex items-center justify-center active:scale-95 active:bg-[#fff5f8] transition-transform backdrop-blur-sm"
+              aria-label="摇一摇匹配"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M4 10v4M2 12h2" />
+                <path d="M20 10v4M22 12h-2" />
+                <rect x="8" y="3" width="8" height="18" rx="2" />
+                <path d="M11 19h2" strokeWidth="1.5" />
+              </svg>
+            </button>
+          </div>
+
           {/* Bottom gradient fade for chat overlay readability */}
           <div
             className="absolute bottom-0 inset-x-0 pointer-events-none"
             style={{ height: "42%", background: "linear-gradient(to top, rgba(244,238,255,0.88) 30%, rgba(244,238,255,0.5) 65%, transparent)" }}
           />
 
-          {/* TOP HUD: friends (left) | bottle + shake (right) */}
+          {/* TOP HUD: friends (left) | 积分（点进装扮）+ 漂流瓶 (right) */}
           <div className="absolute top-2 inset-x-2 z-20 flex items-center justify-between">
             <button
               onClick={() => setShowFriendsList(true)}
@@ -2424,28 +2737,54 @@ export default function Home() {
             </button>
             <div className="flex items-center gap-1.5">
               <button
-                onClick={openBottleMode}
-                className="relative h-7 px-2 rounded-full bg-white/85 border border-[#b8d8ee] shadow-md text-[9px] font-bold flex items-center gap-0.5 active:bg-[#c8e8f8] transition-colors backdrop-blur-sm text-[#2a7aaa]"
-                aria-label="漂流瓶"
+                type="button"
+                onClick={() => setMode("shop")}
+                className="relative w-8 h-8 rounded-full bg-white/85 border border-violet-200/90 shadow-md flex items-center justify-center text-violet-600 active:scale-95 active:bg-violet-50/90 transition-transform backdrop-blur-sm"
+                aria-label={`积分 ${diamonds}，打开装扮`}
               >
-                🫙 漂流瓶
-                {bottleInboxUnread > 0 && (
-                  <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[7px] font-bold flex items-center justify-center leading-none">
-                    {bottleInboxUnread}
-                  </span>
-                )}
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                </svg>
+                <span className="absolute -bottom-0.5 -right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-violet-100 border border-violet-200/80 text-[7px] font-black text-violet-800 tabular-nums flex items-center justify-center leading-none shadow-sm">
+                  {diamonds > 999 ? "999+" : diamonds}
+                </span>
               </button>
               <button
-                onClick={startMatch}
-                className="h-7 px-2.5 rounded-full bg-white/85 border border-[#ecc8d8] shadow-md text-[#c4628a] text-[9px] font-bold flex items-center gap-1 active:bg-[#ecc8d8] transition-colors backdrop-blur-sm"
+                type="button"
+                onClick={openBottleMode}
+                className="relative w-8 h-8 rounded-full bg-white/85 border border-[#b8d8ee] shadow-md flex items-center justify-center text-[#2a7aaa] active:scale-95 active:bg-[#e0f2fe] transition-transform backdrop-blur-sm"
+                aria-label="漂流瓶"
               >
-                🫶 摇一摇
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M9 2h6v2h-1v1.5l2 3.5V20a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2V9l2-3.5V4H9V2z" />
+                  <path d="M8 10h8" />
+                </svg>
+                {bottleInboxUnread > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[13px] h-3 px-0.5 rounded-full bg-red-500 text-white text-[7px] font-bold flex items-center justify-center leading-none border border-white">
+                    {bottleInboxUnread > 9 ? "9+" : bottleInboxUnread}
+                  </span>
+                )}
               </button>
             </div>
           </div>
 
-          {/* BOTTOM chat overlay */}
-          <div className="absolute bottom-0 inset-x-0 z-10 px-2.5 pb-2.5">
+          {/* BOTTOM chat overlay：积分提示全宽水平居中（不受左右 padding 影响） */}
+          <div className="absolute bottom-0 inset-x-0 z-10 pb-2.5 flex flex-col gap-1.5">
+            {diamondDelta !== null && (
+              <div className="w-full flex justify-center pointer-events-none shrink-0 px-0">
+                <div
+                  key={pointsHintKey}
+                  className="points-hint flex justify-center"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <span className="text-[11px] font-semibold text-violet-800 bg-white/85 backdrop-blur-sm px-2.5 py-1 rounded-full border border-violet-300/70 shadow-[0_2px_12px_rgba(91,33,182,0.18)]">
+                    +{diamondDelta} 积分
+                  </span>
+                </div>
+              </div>
+            )}
+            <div className="px-2.5">
             {/* Speech bubble */}
             <div className="bg-white/50 backdrop-blur-md rounded-[18px] border border-white/60 shadow-lg px-3.5 py-2.5">
               <p className="text-[8px] font-bold tracking-[0.22em] text-[#c4a0b0] mb-1">T I N O</p>
@@ -2465,52 +2804,77 @@ export default function Home() {
                 <span className="text-[9px] text-[#c4a0b0]">{companionStatusHint}</span>
               )}
             </div>
+            </div>
           </div>
         </div>
       ) : mode === "shop" ? (
-        /* ── shop: avatar frame store ── */
-        <div className="flex flex-col h-full min-h-0 relative">
-          <div className="flex items-center justify-between px-3 py-2 flex-shrink-0 border-b border-tino-orange/10">
+        /* ── 装扮馆：积分换装扮 ── */
+        <div className="flex flex-col h-full min-h-0 relative bg-gradient-to-b from-[#faf5ff] to-[#fff7ed]">
+          <div className="flex items-center justify-between px-3 py-2 flex-shrink-0 border-b border-violet-200/80">
             <button
+              type="button"
               onClick={() => setMode("companion")}
               className="text-xs font-bold text-tino-orange active:opacity-60 transition-opacity"
             >
               ← 返回
             </button>
-            <span className="text-xs font-bold text-violet-600">💎 {diamonds}</span>
+            <span className="text-[11px] font-black text-violet-700 tabular-nums">
+              ⭐ {diamonds} 积分
+            </span>
           </div>
-          <div className="flex-1 overflow-y-auto px-3 py-2">
-            <h2 className="text-sm font-bold text-tino-brown mb-2 text-center">头像框商店</h2>
+          <div className="flex-1 overflow-y-auto px-3 py-2 scrollbar-hide min-h-0">
+            <p className="text-[10px] text-[#9b87c8] mb-2 text-center leading-snug">
+              说英文得积分；用积分解锁装扮，聊天室里的「你」会穿上～
+            </p>
             <div className="grid grid-cols-2 gap-2">
-              {FRAMES.map((frame) => {
-                const owned = ownedFrames.includes(frame.id);
-                const isActive = activeFrame === frame.id;
-                const canBuy = diamonds >= frame.price;
+              {OUTFITS.map((outfit) => {
+                const owned = ownedOutfits.includes(outfit.id);
+                const isActive = activeOutfit === outfit.id;
+                const canBuy = diamonds >= outfit.price;
                 return (
                   <div
-                    key={frame.id}
+                    key={outfit.id}
                     className={`flex flex-col items-center gap-1.5 p-2 rounded-xl border transition-colors ${
-                      isActive ? "border-violet-400 bg-violet-50" : "border-gray-200 bg-white"
+                      isActive ? "border-amber-400 bg-amber-50/80" : "border-gray-200 bg-white/90"
                     }`}
                   >
-                    <div className="rounded-full" style={frame.id !== "none" ? frame.style : undefined}>
-                      <TinoAvatar size={36} expression="happy" />
+                    <div
+                      className="relative w-11 h-11 rounded-full overflow-visible flex items-center justify-center"
+                      style={outfit.ringStyle || undefined}
+                    >
+                      <Image
+                        src={portraitUser}
+                        alt=""
+                        width={40}
+                        height={40}
+                        className="rounded-full object-cover object-top"
+                        style={{ filter: outfit.imgFilter }}
+                      />
+                      {outfit.badge && (
+                        <span className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-base leading-none">
+                          {outfit.badge}
+                        </span>
+                      )}
                     </div>
-                    <span className="text-[10px] font-bold text-tino-brown">{frame.name}</span>
+                    <span className="text-[10px] font-bold text-tino-brown text-center leading-tight">
+                      {outfit.name}
+                    </span>
                     {owned ? (
                       <button
-                        onClick={() => setActiveFrame(frame.id)}
+                        type="button"
+                        onClick={() => setActiveOutfit(outfit.id)}
                         className={`text-[9px] px-2 py-0.5 rounded-full font-bold transition-colors ${
                           isActive
-                            ? "bg-violet-500 text-white"
+                            ? "bg-amber-500 text-white"
                             : "bg-gray-100 text-tino-brown active:bg-gray-200"
                         }`}
                       >
-                        {isActive ? "使用中" : "使用"}
+                        {isActive ? "使用中" : "穿戴"}
                       </button>
                     ) : (
                       <button
-                        onClick={() => buyFrame(frame)}
+                        type="button"
+                        onClick={() => buyOutfit(outfit)}
                         disabled={!canBuy}
                         className={`text-[9px] px-2 py-0.5 rounded-full font-bold transition-colors ${
                           canBuy
@@ -2518,7 +2882,7 @@ export default function Home() {
                             : "bg-gray-200 text-gray-400 cursor-not-allowed"
                         }`}
                       >
-                        {frame.price} 💎
+                        {outfit.price} 积分
                       </button>
                     )}
                   </div>
@@ -2618,25 +2982,23 @@ export default function Home() {
                       setBottleAudioBase64("");
                       setBottleAudioMime("");
                     }}
-                    className="btn-kid w-full min-h-[58px] rounded-[24px] flex items-center justify-center gap-3 px-4"
+                    className="btn-kid w-full min-h-[58px] rounded-[24px] flex items-center justify-center px-4"
                     style={{
                       background: "linear-gradient(135deg, #ff9a56 0%, #ff6b35 100%)",
                       boxShadow: "0 5px 0 #c44e1a, 0 8px 16px rgba(255,100,40,0.3)",
                     }}
                   >
-                    <span className="text-[28px] leading-none" aria-hidden>🫙</span>
                     <span className="text-[16px] font-extrabold text-white" style={{ textShadow: "0 1px 2px rgba(0,0,0,0.15)" }}>扔瓶子</span>
                   </button>
                   <button
                     type="button"
                     onClick={handlePickBottle}
-                    className="btn-kid w-full min-h-[58px] rounded-[24px] flex items-center justify-center gap-3 px-4"
+                    className="btn-kid w-full min-h-[58px] rounded-[24px] flex items-center justify-center px-4"
                     style={{
                       background: "linear-gradient(135deg, #4dd9c0 0%, #20b2aa 100%)",
                       boxShadow: "0 5px 0 #148a82, 0 8px 16px rgba(32,178,170,0.3)",
                     }}
                   >
-                    <span className="text-[28px] leading-none" aria-hidden>🎣</span>
                     <span className="text-[16px] font-extrabold text-white" style={{ textShadow: "0 1px 2px rgba(0,0,0,0.15)" }}>捞瓶子</span>
                   </button>
                   <button
@@ -2645,13 +3007,12 @@ export default function Home() {
                       setBottleSubState("inbox");
                       fetchBottleInbox();
                     }}
-                    className="btn-kid relative w-full min-h-[58px] rounded-[24px] flex items-center justify-center gap-3 px-4"
+                    className="btn-kid relative w-full min-h-[58px] rounded-[24px] flex items-center justify-center px-4"
                     style={{
                       background: "linear-gradient(135deg, #b088f9 0%, #8b5cf6 100%)",
                       boxShadow: "0 5px 0 #6335c4, 0 8px 16px rgba(139,92,246,0.3)",
                     }}
                   >
-                    <span className="text-[26px] leading-none" aria-hidden>✉️</span>
                     <span className="text-[16px] font-extrabold text-white" style={{ textShadow: "0 1px 2px rgba(0,0,0,0.15)" }}>收件箱</span>
                     {bottleInboxUnread > 0 && (
                       <span className="absolute -top-1.5 -right-1 min-w-[24px] h-[24px] px-1.5 rounded-full bg-[#ff4757] text-white text-[12px] font-black flex items-center justify-center border-2 border-white shadow-md tabular-nums animate-bounce"
@@ -2684,7 +3045,7 @@ export default function Home() {
                       </p>
                     </>
                   ) : isTranscribing ? (
-                    <p className="text-white/85 text-[14px] font-bold animate-pulse">稍等一下哦～✨</p>
+                    <p className="text-white/85 text-[14px] font-bold animate-pulse">稍等一下哦～</p>
                   ) : bottleInput ? (
                     <div className="flex flex-col items-center gap-1.5">
                       <p className="text-[10px] text-white/50 font-semibold">你说的是：</p>
@@ -2700,18 +3061,8 @@ export default function Home() {
                   )}
                 </div>
 
-                <div className="flex flex-wrap justify-center items-center gap-x-4 gap-y-2.5 px-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setBottleSubState("menu");
-                      setBottleInput("");
-                    }}
-                    className="btn-kid min-h-[44px] px-4 text-white/80 text-[13px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
-                  >
-                    返回
-                  </button>
-                  {bottleInput && (
+                {bottleInput && (
+                  <div className="flex flex-nowrap justify-center items-stretch gap-2 px-2 w-full max-w-[320px] mx-auto">
                     <button
                       type="button"
                       onClick={() => {
@@ -2719,25 +3070,23 @@ export default function Home() {
                         setBottleAudioBase64("");
                         setBottleAudioMime("");
                       }}
-                      className="btn-kid min-h-[44px] px-4 text-white/80 text-[13px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
+                      className="btn-kid flex-none w-[36%] min-h-[40px] px-2 text-white/85 text-[12px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
                     >
-                      重新说 🔄
+                      重新说
                     </button>
-                  )}
-                  {bottleInput && (
                     <button
                       type="button"
                       onClick={handleThrowBottle}
-                      className="btn-kid min-h-[48px] px-5 rounded-[20px] text-white text-[15px] font-black"
+                      className="btn-kid flex-1 min-w-0 min-h-[40px] px-3 rounded-[18px] text-white text-[14px] font-black"
                       style={{
                         background: "linear-gradient(135deg, #ff9a56, #ff6b35)",
                         boxShadow: "0 4px 0 #c44e1a, 0 6px 12px rgba(255,100,40,0.3)",
                       }}
                     >
-                      扔出去！🌊
+                      扔出去
                     </button>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2772,7 +3121,7 @@ export default function Home() {
                     boxShadow: "0 4px 0 #148a82, 0 6px 12px rgba(32,178,170,0.25)",
                   }}
                 >
-                  好的 👍
+                  好的
                 </button>
               </div>
             )}
@@ -2802,18 +3151,18 @@ export default function Home() {
               <div className="flex flex-col items-center gap-4 pop-in w-full">
                 {pickedBottle.id ? (
                   <>
-                    <span className="bottle-rise inline-block text-[40px] leading-none">🫙</span>
-                    <div className="flex flex-col items-center gap-1.5 w-full max-w-[210px]">
-                      <p className="text-white/60 text-[11px] font-semibold">
+                    <div className="flex flex-col items-center gap-1.5 w-full max-w-[260px]">
+                      <p className="text-white/60 text-[11px] font-semibold text-center">
                         来自 {pickedBottle.senderName}
-                        {pickedBottle.senderGrade > 0 ? ` · ${pickedBottle.senderGrade}年级` : ""}
                       </p>
                       {pickedBottle.audioBase64 && (
                         <button
                           onClick={() => playAudioBase64(pickedBottle.audioBase64!, "friend")}
                           className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/15 active:bg-white/25 transition-colors"
                         >
-                          <span className="text-[14px]">▶️</span>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" className="text-white/90 shrink-0" aria-hidden>
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
                           <div className="flex gap-[2px] items-end">
                             {[5,9,6,11,7,10,5,8].map((h, i) => (
                               <div key={i} className="w-[2px] rounded-full bg-white/70" style={{ height: h }} />
@@ -2828,27 +3177,27 @@ export default function Home() {
                         </p>
                       </div>
                     </div>
-                    <div className="flex flex-col w-full max-w-[210px] gap-2.5">
+                    <div className="flex flex-nowrap w-full max-w-[280px] gap-2 px-1">
+                      <button
+                        type="button"
+                        onClick={() => setBottleSubState("menu")}
+                        className="btn-kid flex-1 min-w-0 min-h-[40px] px-2 rounded-[16px] text-white/85 text-[12px] font-bold bg-white/10 active:bg-white/20 transition-colors"
+                      >
+                        放回大海
+                      </button>
                       <button
                         type="button"
                         onClick={() => {
                           setBottleSubState("replying");
                           setBottleReplyInput("");
                         }}
-                        className="btn-kid min-h-[50px] rounded-[20px] text-white text-[14px] font-black"
+                        className="btn-kid flex-1 min-w-0 min-h-[40px] px-2 rounded-[16px] text-white text-[13px] font-black"
                         style={{
                           background: "linear-gradient(135deg, #ff9a56, #ff6b35)",
-                          boxShadow: "0 4px 0 #c44e1a, 0 6px 10px rgba(255,100,40,0.25)",
+                          boxShadow: "0 3px 0 #c44e1a, 0 4px 10px rgba(255,100,40,0.22)",
                         }}
                       >
-                        回 TA 一句 💬
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setBottleSubState("menu")}
-                        className="btn-kid min-h-[44px] rounded-2xl text-white/80 text-[13px] font-bold bg-white/10 active:bg-white/20 transition-colors"
-                      >
-                        放回大海 🌊
+                        回一句
                       </button>
                     </div>
                   </>
@@ -2871,7 +3220,7 @@ export default function Home() {
                         boxShadow: "0 4px 0 #c44e1a, 0 6px 10px rgba(255,100,40,0.25)",
                       }}
                     >
-                      我来扔一个！🫙
+                      我来扔一个！
                     </button>
                   </div>
                 )}
@@ -2898,7 +3247,7 @@ export default function Home() {
                       </p>
                     </>
                   ) : isTranscribing ? (
-                    <p className="text-white/85 text-[14px] font-bold animate-pulse">稍等一下哦～✨</p>
+                    <p className="text-white/85 text-[14px] font-bold animate-pulse">稍等一下哦～</p>
                   ) : bottleReplyInput ? (
                     <div className="flex flex-col items-center gap-1.5">
                       <p className="text-[10px] text-white/50 font-semibold">你的回复：</p>
@@ -2931,7 +3280,7 @@ export default function Home() {
                       onClick={() => setBottleReplyInput("")}
                       className="btn-kid min-h-[44px] px-4 text-white/80 text-[13px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
                     >
-                      重新说 🔄
+                      重新说
                     </button>
                   )}
                   {bottleReplyInput && (
@@ -2945,7 +3294,7 @@ export default function Home() {
                         boxShadow: "0 4px 0 #6335c4, 0 6px 12px rgba(139,92,246,0.3)",
                       }}
                     >
-                      {bottleLoading ? "发送中…" : "发出去 ✉️"}
+                      {bottleLoading ? "发送中…" : "发出去"}
                     </button>
                   )}
                 </div>
@@ -2972,7 +3321,7 @@ export default function Home() {
                     boxShadow: "0 4px 0 #6335c4, 0 6px 12px rgba(139,92,246,0.25)",
                   }}
                 >
-                  太棒了 ✨
+                  太棒了
                 </button>
               </div>
             )}
@@ -2982,7 +3331,7 @@ export default function Home() {
               <div className="w-full flex flex-col gap-2.5 flex-1 min-h-0 max-w-[230px] self-center">
                 <p className="text-white text-[15px] font-black text-center shrink-0"
                    style={{ textShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
-                  ✉️ 我的回信
+                  我的回信
                 </p>
                 <div className="flex-1 min-h-0 w-full flex flex-col gap-2.5 overflow-y-auto" style={{ maxHeight: 160 }}>
                   {bottleLoading ? (
@@ -3016,7 +3365,7 @@ export default function Home() {
                           boxShadow: "0 4px 0 #c44e1a, 0 6px 10px rgba(255,100,40,0.25)",
                         }}
                       >
-                        去扔一个！🫙
+                        去扔一个！
                       </button>
                     </div>
                   ) : (
@@ -3024,7 +3373,7 @@ export default function Home() {
                       <div key={i} className="flex flex-col gap-1.5 rounded-2xl bg-white/12 border border-white/20 px-3 py-2.5">
                         <p className="text-white/55 text-[10px] font-semibold leading-relaxed">我说：{b.content}</p>
                         <p className="text-white text-[13px] font-bold leading-relaxed">
-                          💬 {b.reply.repliedByName}：{b.reply.content}
+                          {b.reply.repliedByName}：{b.reply.content}
                         </p>
                       </div>
                     ))
@@ -3039,7 +3388,7 @@ export default function Home() {
                     boxShadow: "0 4px 0 #148a82, 0 6px 10px rgba(32,178,170,0.25)",
                   }}
                 >
-                  回到海边 🌊
+                  回到海边
                 </button>
               </div>
             )}
@@ -3097,47 +3446,15 @@ export default function Home() {
             </div>
           )}
 
-          {/* Add friend dialog */}
-          {showAddFriend && partner && (
-            <div
-              className="absolute inset-0 z-40 bg-black/60 flex items-center justify-center px-5"
-              onClick={() => setShowAddFriend(false)}
-            >
-              <div
-                className="bg-white rounded-3xl p-5 w-full shadow-xl flex flex-col items-center gap-3"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#f9c8e0] to-[#c8a8f0] flex items-center justify-center text-xl font-black text-white">
-                  {partner.name[0]}
-                </div>
-                <div className="text-center">
-                  <p className="text-sm font-black text-[#1e1218]">添加「{partner.name}」为好友？</p>
-                  <p className="text-[10px] text-[#c4a0b0] mt-0.5">之后可以在好友列表找到 ta</p>
-                </div>
-                <div className="flex gap-2 w-full">
-                  <button onClick={() => setShowAddFriend(false)} className="flex-1 py-2 rounded-full bg-gray-100 text-[#888] text-xs font-bold active:bg-gray-200 transition-colors">
-                    取消
-                  </button>
-                  <button
-                    onClick={() => {
-                      try {
-                        const raw = localStorage.getItem("tino_friends_list");
-                        const existing: FriendRecord[] = raw ? JSON.parse(raw) : [];
-                        const filtered = existing.filter((f) => f.name !== partner.name || f.grade !== partner.grade);
-                        const updated = [{ name: partner.name, grade: partner.grade, lastChatAt: Date.now() }, ...filtered].slice(0, 20);
-                        localStorage.setItem("tino_friends_list", JSON.stringify(updated));
-                        setFriendsList(updated);
-                      } catch { /* storage unavailable */ }
-                      setShowAddFriend(false);
-                    }}
-                    className="flex-1 py-2 rounded-full bg-[#7c3fa8] text-white text-xs font-bold active:opacity-80 transition-opacity"
-                  >
-                    确认添加
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* 房间模式：标题 + 剩余时间（好友留言与匹配聊天区分） */}
+          <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-col items-center gap-0.5 max-w-[72%]">
+            <span className="text-[10px] font-black text-[#1a4a7a] bg-white/70 backdrop-blur-sm px-2.5 py-0.5 rounded-full border border-white/60 shadow-sm text-center leading-tight">
+              英语聊天室
+            </span>
+            <span className="text-[9px] font-bold tabular-nums text-[#2a5a8a]/85">
+              剩余 {formatRoomTime(timeLeft)}
+            </span>
+          </div>
 
           {/* Radial warm stage — softens character edges on sunny background */}
           <div
@@ -3169,14 +3486,28 @@ export default function Home() {
                 style={{ mixBlendMode: "multiply", objectPosition: "center 25%" }}
               />
             ) : centerSpeaker === "user" ? (
-              <Image
-                src={portraitUser}
-                alt="User"
-                fill
-                sizes="210px"
-                className="object-contain"
-                style={{ mixBlendMode: "multiply", objectPosition: "center 25%" }}
-              />
+              <div className="absolute inset-0">
+                <Image
+                  src={portraitUser}
+                  alt="User"
+                  fill
+                  sizes="210px"
+                  className="object-contain"
+                  style={{
+                    mixBlendMode: "multiply",
+                    objectPosition: "center 25%",
+                    filter: activeOutfitDef.imgFilter,
+                  }}
+                />
+                {activeOutfitDef.badge && (
+                  <span
+                    className="absolute top-[5%] left-1/2 -translate-x-1/2 text-4xl pointer-events-none select-none drop-shadow-md z-10"
+                    aria-hidden
+                  >
+                    {activeOutfitDef.badge}
+                  </span>
+                )}
+              </div>
             ) : (
               <Image
                 src={portraitPartner}
@@ -3198,7 +3529,22 @@ export default function Home() {
           />
 
           {/* BOTTOM chat overlay */}
-          <div className="absolute bottom-0 inset-x-0 z-10 px-2.5 pb-2">
+          <div className="absolute bottom-0 inset-x-0 z-10 pb-2 flex flex-col gap-1.5">
+            {diamondDelta !== null && (
+              <div className="w-full flex justify-center pointer-events-none shrink-0 px-0">
+                <div
+                  key={pointsHintKey}
+                  className="points-hint flex justify-center"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <span className="text-[11px] font-semibold text-violet-800 bg-white/85 backdrop-blur-sm px-2.5 py-1 rounded-full border border-violet-300/70 shadow-[0_2px_12px_rgba(91,33,182,0.18)]">
+                    +{diamondDelta} 积分
+                  </span>
+                </div>
+              </div>
+            )}
+            <div className="px-2.5">
             {(() => {
               const navMsgs = roomMsgs.filter((m) => m.sender !== "system");
               const totalNav = navMsgs.length;
@@ -3231,57 +3577,58 @@ export default function Home() {
                     </div>
                   ))}
 
-                  {/* Speaker name badge */}
+                  {/* Speaker name badge — 气泡上方居中（旧版） */}
                   {viewedMsg && (
-                    <div className="flex items-center justify-center gap-1.5 mb-1.5">
+                    <div className="flex justify-center mb-1.5">
                       <span className="bg-white/70 backdrop-blur-sm text-[#1a4a7a] text-[10px] font-bold px-3 py-0.5 rounded-full shadow-sm border border-white/60">
                         {cardName}
                         {isAISender && <span className="ml-1 text-[8px] text-[#f59e0b]">AI</span>}
                       </span>
-                      {(isTyping || (isSpeaking && isLatest && !isUser)) && (
-                        <span className="text-[9px] text-[#e07b30] animate-pulse font-bold">说话中…</span>
-                      )}
                     </div>
                   )}
 
                   {/* Message card */}
-                  <div className="bg-white/65 backdrop-blur-md rounded-[16px] border border-white/80 px-3.5 py-2.5 min-h-[56px] shadow-md">
-                    {isTyping ? (
-                      <div className="flex gap-1.5 items-center h-8">
-                        {[0,1,2].map(i => (
-                          <span key={i} className="w-2.5 h-2.5 rounded-full bg-[#5bc8f5] animate-bounce" style={{ animationDelay: `${i * 150}ms` }} />
-                        ))}
-                      </div>
-                    ) : viewedMsg ? (
-                      <div className="max-h-[72px] overflow-y-auto">
-                        <p className="text-[14px] font-black text-[#1a2e4a] leading-snug whitespace-pre-wrap">
-                          {viewedMsg.content}
-                        </p>
-                        {cardTranslation && (
-                          <p className="text-[10px] text-[#5a7a9a] leading-snug mt-1">{cardTranslation}</p>
-                        )}
-                        {!cardTranslation && !isUser && (
-                          <p className="text-[9px] text-[#b0c8d8] mt-0.5">翻译中...</p>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-[12px] text-[#a0b8c8]">等待聊天开始…</p>
-                    )}
+                  <div className="bg-white/65 backdrop-blur-md rounded-[16px] border border-white/80 min-h-[56px] shadow-md overflow-hidden">
+                    <div className="px-3.5 py-2.5">
+                      {isTyping ? (
+                        <div className="flex gap-1.5 items-center h-8">
+                          {[0,1,2].map(i => (
+                            <span key={i} className="w-2.5 h-2.5 rounded-full bg-[#5bc8f5] animate-bounce" style={{ animationDelay: `${i * 150}ms` }} />
+                          ))}
+                        </div>
+                      ) : viewedMsg ? (
+                        <div className="max-h-[72px] overflow-y-auto scrollbar-hide">
+                          <p className="text-[14px] font-black text-[#1a2e4a] leading-snug whitespace-pre-wrap">
+                            {viewedMsg.content}
+                          </p>
+                          {cardTranslation && (
+                            <p className="text-[10px] text-[#5a7a9a] leading-snug mt-1">{cardTranslation}</p>
+                          )}
+                          {!cardTranslation && !isUser && (
+                            <p className="text-[9px] text-[#b0c8d8] mt-0.5">翻译中...</p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-[12px] text-[#a0b8c8]">等待聊天开始…</p>
+                      )}
+                    </div>
                   </div>
 
                   {/* Status */}
                   <div className="flex justify-center mt-1.5">
                     <span className={`text-[11px] font-bold ${companionStatusAccent}`}>{statusText}</span>
                     {companionStatusHint && (
-                      <span className="text-[9px] text-[#8aaa c0] ml-1.5">{companionStatusHint}</span>
+                      <span className="text-[9px] text-[#c4a0b0] ml-1.5">{companionStatusHint}</span>
                     )}
                   </div>
                 </>
               );
             })()}
+            </div>
           </div>
         </div>
       )}
+      </div>
     </DeviceFrame>
   );
 }

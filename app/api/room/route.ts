@@ -2,9 +2,13 @@ import { callDoubao, type ChatMessage } from "@/scripts/ai_api/doubao";
 
 type RoomBody = {
   action: string;
-  recentContext: string;
+  recentContext?: string;
   userNames?: string;
   englishCount?: number;
+  /** silence_nudge: 引导对方 / 引导自己接话 */
+  nudgeTarget?: "peer" | "self";
+  partnerName?: string;
+  selfName?: string;
 };
 
 const TINO_ROOM_BASE = `你是 Tino，一个友好的英语聊天小助手。你在一个英语聊天房间里，帮助两个小朋友用英文聊天。
@@ -41,6 +45,29 @@ export async function POST(req: Request) {
           {
             role: "user",
             content: `聊天即将结束。这两个小朋友在聊天中说了大约${count}句英文。请做一个温暖的总结，鼓励他们做得很棒，并期待下次再见。用英文为主。`,
+          },
+        ];
+        reply = await callDoubao(msgs);
+        break;
+      }
+
+      case "silence_nudge": {
+        const recent = body.recentContext || "（刚开始）";
+        const partnerName = body.partnerName || "小伙伴";
+        const selfName = body.selfName || "小朋友";
+        const target = body.nudgeTarget || "self";
+        const hint =
+          target === "peer"
+            ? `对方「${partnerName}」有一阵子没接话了。请直接称呼 Ta，用一句温暖简短的话请 Ta 用英语接着说，中英混合，最多2句。`
+            : `「${partnerName}」刚说完，「${selfName}」有一阵子没接话。请温和地鼓励 ${selfName} 用英语接着说，中英混合，最多2句。`;
+        const msgs: ChatMessage[] = [
+          {
+            role: "system",
+            content: `${TINO_ROOM_BASE}\n你是 Tino，只在冷场时轻轻提醒下一位该说话的人。`,
+          },
+          {
+            role: "user",
+            content: `最近的对话：\n${recent}\n\n${hint}`,
           },
         ];
         reply = await callDoubao(msgs);

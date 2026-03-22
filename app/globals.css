@@ -25,6 +25,15 @@ body {
   border-radius: 2px;
 }
 
+/* Room message card: keep scroll for long text, hide scrollbar for cleaner UI */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
 @keyframes messageSlideIn {
   from {
     opacity: 0;
@@ -167,6 +176,29 @@ body {
 }
 .diamond-float {
   animation: diamondFloat 1.2s ease-out forwards;
+}
+
+/* 获得积分：对话框上方提示（flex 居中，仅纵向位移） */
+@keyframes pointsHint {
+  0% {
+    opacity: 0;
+    transform: translateY(5px) scale(0.96);
+  }
+  14% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  55% {
+    opacity: 0.92;
+    transform: translateY(-2px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+}
+.points-hint {
+  animation: pointsHint 1.25s ease-out forwards;
 }
 
 /* ── Drift bottle animations ── */

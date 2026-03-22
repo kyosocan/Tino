@@ -33,8 +33,9 @@ export async function POST(req: Request) {
 
     const result = await callDoubao(msgs, {
       model: process.env.ARK_TRANSLATE_MODEL || "doubao-seed-2-0-lite-260215",
-      timeoutMs: Number(process.env.ARK_TRANSLATE_TIMEOUT_MS || "8000"),
-      retries: 1,
+      /** 翻译含 JSON/音标，方舟偶发 >8s，默认 18s；可用 ARK_TRANSLATE_TIMEOUT_MS 覆盖 */
+      timeoutMs: Number(process.env.ARK_TRANSLATE_TIMEOUT_MS || "18000"),
+      retries: 2,
     });
 
     if (isEn2Zh) return Response.json({ chinese: result || "" });
@@ -51,7 +52,12 @@ export async function POST(req: Request) {
       return Response.json({ english: (result || "").trim(), words: [], voiceGuide: "" });
     }
   } catch (error) {
-    console.error("[Translate API Error]", error);
+    const isAbort = error instanceof Error && error.name === "AbortError";
+    if (isAbort) {
+      console.warn("[Translate API] 请求超时，可检查 ARK_TRANSLATE_TIMEOUT_MS 或网络");
+    } else {
+      console.error("[Translate API Error]", error);
+    }
     return Response.json({ english: "", chinese: "", words: [], voiceGuide: "" });
   }
 }

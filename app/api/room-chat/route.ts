@@ -51,6 +51,74 @@ async function generateTinoComment(roomId: string) {
   }
 }
 
+const SILENCE_NUDGE_MS = 25_000;
+const SILENCE_NUDGE_COOLDOWN_MS = 45_000;
+
+/** 对方太久没接话时，由 Tino 轻声引导该说话的一方 */
+async function generateSilenceNudge(roomId: string, userId: string) {
+  const room = getRoom(roomId);
+  if (!room || room.tinoGenerating) return { ok: false as const };
+
+  const me = room.users.find((u) => u.userId === userId);
+  const partner = room.users.find((u) => u.userId !== userId);
+  if (!me || !partner) return { ok: false as const };
+
+  const nonTino = room.messages.filter((m) => m.senderId !== "tino");
+  const lastMsg = nonTino[nonTino.length - 1];
+  if (!lastMsg) return { ok: false as const };
+
+  if (Date.now() - lastMsg.timestamp < SILENCE_NUDGE_MS) return { ok: false as const };
+
+  if (
+    room.lastSilenceNudgeAt &&
+    Date.now() - room.lastSilenceNudgeAt < SILENCE_NUDGE_COOLDOWN_MS
+  ) {
+    return { ok: false as const };
+  }
+
+  let nudgeWho: "peer" | "self";
+  if (lastMsg.senderId === userId) nudgeWho = "peer";
+  else if (lastMsg.senderId === partner.userId) nudgeWho = "self";
+  else return { ok: false as const };
+
+  room.tinoGenerating = true;
+  try {
+    const userNames = room.users.map((u) => u.name).join(" 和 ");
+    const recent = room.messages
+      .slice(-10)
+      .map((m) => `${m.senderName}: ${m.content}`)
+      .join("\n");
+
+    const hint =
+      nudgeWho === "peer"
+        ? `对方小朋友「${partner.name}」有一阵子没接话了。请直接称呼 Ta 的名字，用一句温暖简短的话请 Ta 试着用英语回应，中英混合，最多2句。`
+        : `刚才「${partner.name}」已经说了。「${me.name}」有一阵子没接话。请温和地鼓励 ${me.name} 用英语接着说，中英混合，最多2句。`;
+
+    const msgs: ChatMessage[] = [
+      {
+        role: "system",
+        content: `${TINO_ROOM_PROMPT}\n房间里有：${userNames}。\n你是 Tino，只在冷场时轻轻提醒下一位该说话的人。`,
+      },
+      {
+        role: "user",
+        content: `最近的对话：\n${recent}\n\n${hint}`,
+      },
+    ];
+
+    const reply = await callDoubao(msgs);
+    if (reply) {
+      addTinoMessage(roomId, reply);
+      room.lastSilenceNudgeAt = Date.now();
+      return { ok: true as const };
+    }
+  } catch (error) {
+    console.error("[Tino silence nudge error]", error);
+  } finally {
+    room.tinoGenerating = false;
+  }
+  return { ok: false as const };
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -109,6 +177,15 @@ export async function POST(req: Request) {
           createdAt: room.createdAt,
           messageCount: room.messages.length,
         });
+      }
+
+      case "silence_nudge": {
+        const { roomId, userId } = body;
+        if (!roomId || !userId) {
+          return Response.json({ error: "missing fields" }, { status: 400 });
+        }
+        const result = await generateSilenceNudge(roomId, userId);
+        return Response.json(result);
       }
 
       default:
