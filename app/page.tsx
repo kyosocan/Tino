@@ -767,7 +767,11 @@ export default function Home() {
   /** iOS Safari：需在用户手势内 resume，并播一帧静音，后续异步 TTS 才能出声 */
   const silentPrimedRef = useRef(false);
 
-  const unlockAudio = useCallback(async () => {
+  /**
+   * 同步解锁音频（必须在点击/触摸等用户手势的同步栈内调用）。
+   * iOS/WebKit：对 `resume()` 使用 `await` 会脱离手势链，导致上下文一直保持 suspended、后续无声音。
+   */
+  const unlockAudioSync = useCallback(() => {
     const Ctx =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext })
@@ -786,16 +790,18 @@ export default function Home() {
     if (!ctx || !gain) return;
 
     gain.gain.value = volumeRef.current / 10;
-    try {
-      await ctx.resume();
-    } catch {
-      /* ignore */
+    /* 禁止 await：必须在手势同步路径上调用 */
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => {
+        /* ignore */
+      });
     }
 
     if (!silentPrimedRef.current) {
       silentPrimedRef.current = true;
       try {
-        const silent = ctx.createBuffer(1, 1, ctx.sampleRate);
+        const frames = Math.max(2, Math.floor(ctx.sampleRate * 0.05));
+        const silent = ctx.createBuffer(1, frames, ctx.sampleRate);
         const src = ctx.createBufferSource();
         src.buffer = silent;
         src.connect(gain);
@@ -840,7 +846,7 @@ export default function Home() {
 
       ttsChain.current = ttsChain.current.then(async () => {
         try {
-          await unlockAudio();
+          unlockAudioSync();
           const ctx = audioCtxRef.current;
           const gain = gainNodeRef.current;
           if (!ctx || !gain) {
@@ -892,7 +898,7 @@ export default function Home() {
         }
       });
     },
-    [highlightSpeaker, unlockAudio]
+    [highlightSpeaker, unlockAudioSync]
   );
 
   const playTTS = useCallback(
@@ -902,7 +908,7 @@ export default function Home() {
 
       ttsChain.current = ttsChain.current.then(async () => {
         try {
-          await unlockAudio();
+          unlockAudioSync();
 
           const voiceType =
             speaker === "ai_buddy"
@@ -983,7 +989,7 @@ export default function Home() {
         }
       });
     },
-    [highlightSpeaker, unlockAudio]
+    [highlightSpeaker, unlockAudioSync]
   );
 
   /* Pre-fetch a TTS clip and store in cache so the room view can play it immediately. */
@@ -992,7 +998,7 @@ export default function Home() {
       const cacheKey = ttsCacheKey(text, voiceType);
       if (ttsCache.current.has(cacheKey)) return;
       try {
-        await unlockAudio();
+        unlockAudioSync();
         const res = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1013,7 +1019,7 @@ export default function Home() {
         /* ignore */
       }
     },
-    [unlockAudio]
+    [unlockAudioSync]
   );
 
   /* companion display auto-scroll */
@@ -1767,7 +1773,7 @@ export default function Home() {
 
   const startRecording = useCallback(async () => {
     if (!isPowered || isRecording) return;
-    await unlockAudio();
+    unlockAudioSync();
     highlightSpeaker("user");
     try {
       setRecordingError("");
@@ -1878,7 +1884,7 @@ export default function Home() {
         error instanceof Error ? error.message : "无法使用麦克风，请检查权限设置";
       setRecordingError(message);
     }
-  }, [isPowered, isRecording, sendMessage, sendRoom, handleRoomMessage, highlightSpeaker, unlockAudio]);
+  }, [isPowered, isRecording, sendMessage, sendRoom, handleRoomMessage, highlightSpeaker, unlockAudioSync]);
 
   const stopRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
@@ -1891,19 +1897,19 @@ export default function Home() {
   /* ─── device buttons ─── */
 
   const handlePower = useCallback(() => {
-    unlockAudio();
+    unlockAudioSync();
     setIsPowered((p) => !p);
-  }, [unlockAudio]);
+  }, [unlockAudioSync]);
   const handleVolumeUp = useCallback(() => {
-    unlockAudio();
+    unlockAudioSync();
     setVolume((v) => Math.min(v + 1, 10));
     setShowVolume(true);
-  }, [unlockAudio]);
+  }, [unlockAudioSync]);
   const handleVolumeDown = useCallback(() => {
-    unlockAudio();
+    unlockAudioSync();
     setVolume((v) => Math.max(v - 1, 0));
     setShowVolume(true);
-  }, [unlockAudio]);
+  }, [unlockAudioSync]);
 
   useEffect(() => {
     if (!showVolume) return;
@@ -2024,7 +2030,7 @@ export default function Home() {
 
   const startMatch = useCallback(async () => {
     if (friendVoiceMemoRef.current) return;
-    await unlockAudio();
+    unlockAudioSync();
     setMatchingPhase("waiting");
     setMode("matching");
 
@@ -2076,7 +2082,7 @@ export default function Home() {
       setMatchingPhase("waiting");
       setMode("companion");
     }
-  }, [unlockAudio, userId, userName, userGrade, enterRoom, enterAiRoom, notifyMatchLeave]);
+  }, [unlockAudioSync, userId, userName, userGrade, enterRoom, enterAiRoom, notifyMatchLeave]);
 
   const cancelMatch = useCallback(() => {
     if (matchPollRef.current) clearInterval(matchPollRef.current);
@@ -2478,9 +2484,10 @@ export default function Home() {
       {!isAppReady ? (
         /* ── splash screen ── */
         <div
-          className="h-full rounded-[8px] bg-gradient-to-b from-[#fde8f0] via-[#fff3f7] to-[#f0ebff] relative overflow-hidden select-none cursor-pointer"
-          onClick={async () => {
-            await unlockAudio();
+          className="h-full rounded-[8px] bg-gradient-to-b from-[#fde8f0] via-[#fff3f7] to-[#f0ebff] relative overflow-hidden select-none cursor-pointer touch-manipulation"
+          onPointerDown={() => {
+            /* pointerdown 早于 click，且同属用户手势；同步 unlock，勿 await */
+            unlockAudioSync();
             setIsAppReady(true);
           }}
         >
