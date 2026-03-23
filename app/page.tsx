@@ -78,8 +78,8 @@ const ONBOARDING_STEPS = [
 
 const ROOM_DURATION = 300;
 /** 聊天室：一方久未接话后，Tino 冷场引导 */
-const ROOM_SILENCE_MS = 25_000;
-const ROOM_SILENCE_POLL_MS = 5000;
+const ROOM_SILENCE_MS = 10_000;
+const ROOM_SILENCE_POLL_MS = 3000;
 
 /** 英语角：对方 AI 伙伴（ai_buddy）TTS 音色 */
 const TTS_VOICE_AI_BUDDY = "zh_female_xiaoxue_uranus_bigtts";
@@ -828,25 +828,6 @@ export default function Home() {
     }
   }, []);
 
-  /**
-   * 开屏在同一次用户手势内：解锁 Web 播放（无系统「声音权限」弹窗）并发起麦克风授权。
-   * getUserMedia 须在本轮手势内同步调用，随后立即停流，仅占位完成授权。
-   */
-  const primeSplashPermissions = useCallback(() => {
-    unlockAudioSync();
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      return;
-    }
-    void navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then((stream) => {
-        stream.getTracks().forEach((t) => t.stop());
-      })
-      .catch(() => {
-        /* 用户拒绝或环境不支持：仍可进入应用使用文字等 */
-      });
-  }, [unlockAudioSync]);
-
   useEffect(() => {
     volumeRef.current = volume;
     if (gainNodeRef.current) gainNodeRef.current.gain.value = volume / 10;
@@ -1571,7 +1552,10 @@ export default function Home() {
   const greetingPlayedRef = useRef(false);
   useEffect(() => {
     if (!isPowered || mode !== "companion" || !isAppReady || greetingPlayedRef.current) return;
-    const saved = displayText;
+    const fromState = displayText.trim();
+    const fromMsgs =
+      companionMsgs.find((m) => m.sender === "tino")?.content?.trim() ?? "";
+    const saved = fromState || fromMsgs;
     if (!saved) return;
     greetingPlayedRef.current = true;
     setDisplayText("");
@@ -1580,7 +1564,7 @@ export default function Home() {
         if (modeRef.current === "companion") setDisplayText(s);
       });
     }
-  }, [isPowered, mode, displayText, isAppReady]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isPowered, mode, displayText, isAppReady, companionMsgs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onboardingDoneRef = useRef(false);
 
@@ -1731,12 +1715,12 @@ export default function Home() {
 
       if (!cancelled) setRoomReady(true);
 
-      /* 双方各用自家 AI 只向对方孩子介绍另一位小朋友，不做自我介绍、不点名热场 */
+      /* 双方各用自家 AI 只向对方孩子介绍另一位小朋友；两句结构、语气区分，避免听起来像复读 */
       const tinoIntro =
-        `Hi ${myName}! ${friendName} is your partner in the English corner today.\n一起用英语打个招呼吧！`;
+        `Hi ${myName}, ${friendName} is your partner for today's English corner — say something in English to say hi.\n用英语打个招呼就行，越简单越好～`;
 
       const buddyIntro =
-        `Hi ${friendName}! ${myName} is your partner in the English corner today.\n一起用英语打个招呼吧！`;
+        `${friendName}, ${myName} is here with you — try one short English line to answer back.\n轮到你开口啦，随便说句英语吧～`;
 
       speakRoomSentences("tino", tinoIntro, () => {
         if (cancelled || modeRef.current !== "room") return;
@@ -2009,7 +1993,9 @@ export default function Home() {
       /* Pre-fetch 破冰首句 TTS，减轻进房后首段延迟 */
       const myName = userName || "小朋友";
       const fn = p.name || "小伙伴";
-      await prefetchTTS(`Hi ${myName}! ${fn} is your partner in the English corner today.`);
+      await prefetchTTS(
+        `Hi ${myName}, ${fn} is your partner for today's English corner — say something in English to say hi.`
+      );
 
       setMode("room");
     },
@@ -2041,7 +2027,9 @@ export default function Home() {
 
       const myName = userName || "小朋友";
       const fn = aiPartner.name;
-      await prefetchTTS(`Hi ${myName}! ${fn} is your partner in the English corner today.`);
+      await prefetchTTS(
+        `Hi ${myName}, ${fn} is your partner for today's English corner — say something in English to say hi.`
+      );
 
       setMode("room");
     }, 1800);
@@ -2505,8 +2493,8 @@ export default function Home() {
         <div
           className="h-full rounded-[8px] bg-gradient-to-b from-[#fde8f0] via-[#fff3f7] to-[#f0ebff] relative overflow-hidden select-none cursor-pointer touch-manipulation"
           onPointerDown={() => {
-            /* pointerdown 早于 click，且同属用户手势；同步 unlock + 发起麦克风授权 */
-            primeSplashPermissions();
+            /* 仅同步解锁播放。开屏调 getUserMedia 会弹系统麦克风框，部分 WebKit 会挂起 AudioContext，导致进主页后 TTS 不播；麦克风仍在首次按住说话时请求。 */
+            unlockAudioSync();
             setIsAppReady(true);
           }}
         >
@@ -2537,11 +2525,8 @@ export default function Home() {
                   />
                 ))}
               </div>
-              <p className="text-[10px] font-semibold text-[#c4a0b0] animate-pulse text-center px-3">
-                轻触开启播放与麦克风
-              </p>
-              <p className="text-[9px] text-[#c4a0b0]/75 text-center px-4 mt-1 leading-snug max-w-[240px]">
-                扬声器无系统弹窗；语音需麦克风授权，拒绝后仍可打字聊天
+              <p className="text-[10px] font-semibold text-[#c4a0b0] animate-pulse">
+                轻触屏幕开始
               </p>
             </div>
           </div>

@@ -51,8 +51,8 @@ async function generateTinoComment(roomId: string) {
   }
 }
 
-const SILENCE_NUDGE_MS = 25_000;
-const SILENCE_NUDGE_COOLDOWN_MS = 45_000;
+const SILENCE_NUDGE_MS = 10_000;
+const SILENCE_NUDGE_COOLDOWN_MS = 40_000;
 
 /** 对方太久没接话时，由 Tino 轻声引导该说话的一方 */
 async function generateSilenceNudge(roomId: string, userId: string) {
