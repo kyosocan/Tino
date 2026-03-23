@@ -81,6 +81,14 @@ const ROOM_DURATION = 300;
 const ROOM_SILENCE_MS = 25_000;
 const ROOM_SILENCE_POLL_MS = 5000;
 
+/** 英语角：对方 AI 伙伴（ai_buddy）TTS 音色 */
+const TTS_VOICE_AI_BUDDY = "zh_female_xiaoxue_uranus_bigtts";
+/** 英语角：AI 替补小朋友（friend，仅 isAiRoom）TTS 音色 */
+const TTS_VOICE_AI_CHILD = "zh_female_peiqi_uranus_bigtts";
+
+function ttsCacheKey(text: string, voiceType: string | undefined): string {
+  return `${voiceType ?? "default"}|${text}`;
+}
 
 function formatFriendLastChatTime(timestamp: number): string {
   if (!timestamp) return "最近";
@@ -756,14 +764,17 @@ export default function Home() {
   const ttsCache = useRef<Map<string, AudioBuffer>>(new Map());
 
   const motionGrantedRef = useRef(false);
+  /** iOS Safari：需在用户手势内 resume，并播一帧静音，后续异步 TTS 才能出声 */
+  const silentPrimedRef = useRef(false);
 
-  const unlockAudio = useCallback(() => {
+  const unlockAudio = useCallback(async () => {
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext })
+        .webkitAudioContext;
+    if (!Ctx) return;
+
     if (!audioCtxRef.current) {
-      const Ctx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext })
-          .webkitAudioContext;
-      if (!Ctx) return;
       const ctx = new Ctx();
       const gain = ctx.createGain();
       gain.connect(ctx.destination);
@@ -771,20 +782,42 @@ export default function Home() {
       gainNodeRef.current = gain;
     }
     const ctx = audioCtxRef.current;
-    if (ctx.state === "suspended") ctx.resume();
+    const gain = gainNodeRef.current;
+    if (!ctx || !gain) return;
+
+    gain.gain.value = volumeRef.current / 10;
+    try {
+      await ctx.resume();
+    } catch {
+      /* ignore */
+    }
+
+    if (!silentPrimedRef.current) {
+      silentPrimedRef.current = true;
+      try {
+        const silent = ctx.createBuffer(1, 1, ctx.sampleRate);
+        const src = ctx.createBufferSource();
+        src.buffer = silent;
+        src.connect(gain);
+        src.start(0);
+      } catch {
+        /* ignore */
+      }
+    }
 
     if (!motionGrantedRef.current) {
-      motionGrantedRef.current = true; // 防止并发重复请求
+      motionGrantedRef.current = true;
       const DM = DeviceMotionEvent as unknown as {
         requestPermission?: () => Promise<string>;
       };
       if (typeof DM.requestPermission === "function") {
-        // 必须在同步用户手势上下文里调用，此处满足（unlockAudio 由触摸/点击事件触发）
         DM.requestPermission()
           .then((result) => {
-            if (result !== "granted") motionGrantedRef.current = false; // 拒绝后允许下次再试
+            if (result !== "granted") motionGrantedRef.current = false;
           })
-          .catch(() => { motionGrantedRef.current = false; });
+          .catch(() => {
+            motionGrantedRef.current = false;
+          });
       }
     }
   }, []);
@@ -801,30 +834,32 @@ export default function Home() {
       onPlayStart?: () => void
     ) => {
       if (!audioBase64) return;
-      unlockAudio();
-      const ctx = audioCtxRef.current;
-      const gain = gainNodeRef.current;
-      if (!ctx || !gain) return;
 
       ttsPending.current++;
       setIsSpeaking(true);
 
-      const audioReady = (async (): Promise<AudioBuffer | null> => {
-        try {
-          const binary = atob(audioBase64);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-          }
-          return await ctx.decodeAudioData(bytes.buffer.slice(0));
-        } catch {
-          return null;
-        }
-      })();
-
       ttsChain.current = ttsChain.current.then(async () => {
         try {
-          const audioBuffer = await audioReady;
+          await unlockAudio();
+          const ctx = audioCtxRef.current;
+          const gain = gainNodeRef.current;
+          if (!ctx || !gain) {
+            onPlayStart?.();
+            return;
+          }
+
+          let audioBuffer: AudioBuffer | null = null;
+          try {
+            const binary = atob(audioBase64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+          } catch {
+            audioBuffer = null;
+          }
+
           if (!audioBuffer) {
             onPlayStart?.();
             return;
@@ -862,40 +897,52 @@ export default function Home() {
 
   const playTTS = useCallback(
     (text: string, speaker?: string, onPlayStart?: () => void) => {
-      unlockAudio();
-
-      /* Start fetching audio immediately (parallel with any running chain step).
-         Check in-memory cache first to avoid redundant network calls. */
-      const audioReady = (async (): Promise<AudioBuffer | null> => {
-        if (ttsCache.current.has(text)) return ttsCache.current.get(text)!;
-        try {
-          const res = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
-          });
-          const data = await res.json();
-          if (!data.audioBase64 || data.error) return null;
-          const ctx = audioCtxRef.current;
-          if (!ctx) return null;
-          const buffer = await ctx.decodeAudioData(
-            Uint8Array.from(atob(data.audioBase64), (c) => c.charCodeAt(0)).buffer.slice(0)
-          );
-          ttsCache.current.set(text, buffer);
-          return buffer;
-        } catch {
-          return null;
-        }
-      })();
-
-      /* Reserve a chain slot NOW (in call order) so playback order matches call order
-         regardless of which fetch completes first. */
       ttsPending.current++;
       setIsSpeaking(true);
 
       ttsChain.current = ttsChain.current.then(async () => {
         try {
-          const audioBuffer = await audioReady; /* wait for this sentence's fetch */
+          await unlockAudio();
+
+          const voiceType =
+            speaker === "ai_buddy"
+              ? TTS_VOICE_AI_BUDDY
+              : speaker === "friend" && isAiRoomRef.current
+                ? TTS_VOICE_AI_CHILD
+                : undefined;
+          const cacheKey = ttsCacheKey(text, voiceType);
+
+          let audioBuffer: AudioBuffer | null = null;
+          if (ttsCache.current.has(cacheKey)) {
+            audioBuffer = ttsCache.current.get(cacheKey)!;
+          } else {
+            try {
+              const res = await fetch("/api/tts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  text,
+                  ...(voiceType ? { voiceType } : {}),
+                }),
+              });
+              const data = await res.json();
+              if (!data.audioBase64 || data.error) {
+                onPlayStart?.();
+                return;
+              }
+              const ctx = audioCtxRef.current;
+              if (!ctx) {
+                onPlayStart?.();
+                return;
+              }
+              audioBuffer = await ctx.decodeAudioData(
+                Uint8Array.from(atob(data.audioBase64), (c) => c.charCodeAt(0)).buffer.slice(0)
+              );
+              ttsCache.current.set(cacheKey, audioBuffer);
+            } catch {
+              audioBuffer = null;
+            }
+          }
 
           if (!audioBuffer) {
             onPlayStart?.();
@@ -904,7 +951,10 @@ export default function Home() {
 
           const ctx = audioCtxRef.current;
           const gain = gainNodeRef.current;
-          if (!ctx || !gain) return;
+          if (!ctx || !gain) {
+            onPlayStart?.();
+            return;
+          }
 
           if (ctx.state === "suspended") await ctx.resume();
           if (speaker) highlightSpeaker(speaker);
@@ -937,24 +987,34 @@ export default function Home() {
   );
 
   /* Pre-fetch a TTS clip and store in cache so the room view can play it immediately. */
-  const prefetchTTS = useCallback(async (text: string) => {
-    if (ttsCache.current.has(text)) return;
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      const data = await res.json();
-      if (!data.audioBase64 || data.error) return;
-      const ctx = audioCtxRef.current;
-      if (!ctx) return;
-      const buffer = await ctx.decodeAudioData(
-        Uint8Array.from(atob(data.audioBase64), (c) => c.charCodeAt(0)).buffer.slice(0)
-      );
-      ttsCache.current.set(text, buffer);
-    } catch { /* ignore */ }
-  }, []);
+  const prefetchTTS = useCallback(
+    async (text: string, voiceType?: string) => {
+      const cacheKey = ttsCacheKey(text, voiceType);
+      if (ttsCache.current.has(cacheKey)) return;
+      try {
+        await unlockAudio();
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            ...(voiceType ? { voiceType } : {}),
+          }),
+        });
+        const data = await res.json();
+        if (!data.audioBase64 || data.error) return;
+        const ctx = audioCtxRef.current;
+        if (!ctx) return;
+        const buffer = await ctx.decodeAudioData(
+          Uint8Array.from(atob(data.audioBase64), (c) => c.charCodeAt(0)).buffer.slice(0)
+        );
+        ttsCache.current.set(cacheKey, buffer);
+      } catch {
+        /* ignore */
+      }
+    },
+    [unlockAudio]
+  );
 
   /* companion display auto-scroll */
   const companionBoxRef = useRef<HTMLDivElement>(null);
@@ -1644,15 +1704,26 @@ export default function Home() {
       const myName = userName || "小朋友";
       const friendName = partnerRef.current?.name || "小伙伴";
 
-      // 简短欢迎，不强推话题，给孩子空间自由破冰
-      // setRoomReady(true) 在推第一条消息前触发，页面此时才从匹配态切换过来
       if (!cancelled) setRoomReady(true);
-      speakRoomSentences("tino", `Hi ${myName} and ${friendName}! Welcome! 快来互相打个招呼吧～`, () => {
-        if (!cancelled) setIcebreakerDone(true);
+
+      /* 双方各用自家 AI 只向对方孩子介绍另一位小朋友，不做自我介绍、不点名热场 */
+      const tinoIntro =
+        `Hi ${myName}! ${friendName} is your partner in the English corner today.\n一起用英语打个招呼吧！`;
+
+      const buddyIntro =
+        `Hi ${friendName}! ${myName} is your partner in the English corner today.\n一起用英语打个招呼吧！`;
+
+      speakRoomSentences("tino", tinoIntro, () => {
+        if (cancelled || modeRef.current !== "room") return;
+        speakRoomSentences("ai_buddy", buddyIntro, () => {
+          if (!cancelled) setIcebreakerDone(true);
+        });
       });
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ─── room: auto-translate new messages (English → Chinese) ─── */
@@ -1696,7 +1767,7 @@ export default function Home() {
 
   const startRecording = useCallback(async () => {
     if (!isPowered || isRecording) return;
-    unlockAudio();
+    await unlockAudio();
     highlightSpeaker("user");
     try {
       setRecordingError("");
@@ -1910,10 +1981,10 @@ export default function Home() {
       lastPollTimeRef.current = 0;
       friendInvitePromptShownRef.current = false;
 
-      /* Pre-fetch the welcome TTS so the room view can play it instantly */
+      /* Pre-fetch 破冰首句 TTS，减轻进房后首段延迟 */
       const myName = userName || "小朋友";
-      const welcomeText = `Hi ${myName} and ${p.name || "小伙伴"}! Welcome! 快来互相打个招呼吧～`;
-      await prefetchTTS(welcomeText);
+      const fn = p.name || "小伙伴";
+      await prefetchTTS(`Hi ${myName}! ${fn} is your partner in the English corner today.`);
 
       setMode("room");
     },
@@ -1943,10 +2014,9 @@ export default function Home() {
       lastPollTimeRef.current = 0;
       friendInvitePromptShownRef.current = false;
 
-      /* Pre-fetch the welcome TTS so the room view can play it instantly */
       const myName = userName || "小朋友";
-      const welcomeText = `Hi ${myName} and ${aiPartner.name}! Welcome! 快来互相打个招呼吧～`;
-      await prefetchTTS(welcomeText);
+      const fn = aiPartner.name;
+      await prefetchTTS(`Hi ${myName}! ${fn} is your partner in the English corner today.`);
 
       setMode("room");
     }, 1800);
@@ -1954,7 +2024,7 @@ export default function Home() {
 
   const startMatch = useCallback(async () => {
     if (friendVoiceMemoRef.current) return;
-    unlockAudio();
+    await unlockAudio();
     setMatchingPhase("waiting");
     setMode("matching");
 
@@ -2183,9 +2253,11 @@ export default function Home() {
   const centerLabel =
     centerSpeaker === "tino"
       ? "Tino"
-      : centerSpeaker === "user"
-        ? (userName || "我")
-        : partner?.name || "小伙伴";
+      : centerSpeaker === "ai_buddy"
+        ? (aiBuddyName || "Buddy")
+        : centerSpeaker === "user"
+          ? (userName || "我")
+          : partner?.name || "小伙伴";
 
   useEffect(() => {
     const el = lyricsRef.current;
@@ -2407,7 +2479,10 @@ export default function Home() {
         /* ── splash screen ── */
         <div
           className="h-full rounded-[8px] bg-gradient-to-b from-[#fde8f0] via-[#fff3f7] to-[#f0ebff] relative overflow-hidden select-none cursor-pointer"
-          onClick={() => { unlockAudio(); setIsAppReady(true); }}
+          onClick={async () => {
+            await unlockAudio();
+            setIsAppReady(true);
+          }}
         >
           {/* portrait — full bleed, bottom-anchored */}
           <div className="absolute inset-x-0 top-0 bottom-[25%] flex items-end justify-center">

@@ -93,14 +93,7 @@ export function joinQueue(user: {
       lastTinoAt: 0,
     };
 
-    const welcome: RoomMessage = {
-      id: `msg_tino_welcome`,
-      senderId: "tino",
-      senderName: "Tino",
-      content: `Hi ${partner.name} and ${user.name}! Welcome to the English Chat Room! I'm Tino, your English chat helper. Let's have fun chatting in English today! Say hi to each other! 🎉`,
-      timestamp: Date.now(),
-    };
-    room.messages.push(welcome);
+    /* 进房欢迎与热场由客户端统一播报，避免与本地双 AI 引导重复 */
 
     store.rooms.set(roomId, room);
     store.userRoomMap.set(partner.userId, roomId);
