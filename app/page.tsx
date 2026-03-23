@@ -828,6 +828,25 @@ export default function Home() {
     }
   }, []);
 
+  /**
+   * 开屏在同一次用户手势内：解锁 Web 播放（无系统「声音权限」弹窗）并发起麦克风授权。
+   * getUserMedia 须在本轮手势内同步调用，随后立即停流，仅占位完成授权。
+   */
+  const primeSplashPermissions = useCallback(() => {
+    unlockAudioSync();
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      return;
+    }
+    void navigator.mediaDevices
+      .getUserMedia({ audio: true })
+      .then((stream) => {
+        stream.getTracks().forEach((t) => t.stop());
+      })
+      .catch(() => {
+        /* 用户拒绝或环境不支持：仍可进入应用使用文字等 */
+      });
+  }, [unlockAudioSync]);
+
   useEffect(() => {
     volumeRef.current = volume;
     if (gainNodeRef.current) gainNodeRef.current.gain.value = volume / 10;
@@ -2486,8 +2505,8 @@ export default function Home() {
         <div
           className="h-full rounded-[8px] bg-gradient-to-b from-[#fde8f0] via-[#fff3f7] to-[#f0ebff] relative overflow-hidden select-none cursor-pointer touch-manipulation"
           onPointerDown={() => {
-            /* pointerdown 早于 click，且同属用户手势；同步 unlock，勿 await */
-            unlockAudioSync();
+            /* pointerdown 早于 click，且同属用户手势；同步 unlock + 发起麦克风授权 */
+            primeSplashPermissions();
             setIsAppReady(true);
           }}
         >
@@ -2518,7 +2537,12 @@ export default function Home() {
                   />
                 ))}
               </div>
-              <p className="text-[10px] font-semibold text-[#c4a0b0] animate-pulse">轻触屏幕开始</p>
+              <p className="text-[10px] font-semibold text-[#c4a0b0] animate-pulse text-center px-3">
+                轻触开启播放与麦克风
+              </p>
+              <p className="text-[9px] text-[#c4a0b0]/75 text-center px-4 mt-1 leading-snug max-w-[240px]">
+                扬声器无系统弹窗；语音需麦克风授权，拒绝后仍可打字聊天
+              </p>
             </div>
           </div>
         </div>
