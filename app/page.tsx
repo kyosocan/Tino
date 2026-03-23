@@ -70,7 +70,7 @@ function splitIntoSentences(text: string): string[] {
 
 /* First-visit onboarding messages delivered in sequence.
  * Only the first two steps are timer-driven.
- * After step 1 a reading card appears; the remaining steps fire when the card is dismissed. */
+ * After step 2: 跟读卡片出现；跟读完成或关闭卡片后，再播「摇一摇匹配其他小朋友」引导。 */
 const ONBOARDING_STEPS = [
   { delay: 1500, text: "我是 Tino，你的英语聊天小伙伴！\n我们可以一起聊天、玩游戏，还能认识新朋友～" },
   { delay: 6500, text: "遇到新朋友就可以说这句话：Nice to meet you！" },
@@ -81,12 +81,6 @@ const ROOM_DURATION = 300;
 const ROOM_SILENCE_MS = 25_000;
 const ROOM_SILENCE_POLL_MS = 5000;
 
-
-function formatRoomTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
 
 function formatFriendLastChatTime(timestamp: number): string {
   if (!timestamp) return "最近";
@@ -202,24 +196,18 @@ function getCompanionMemoryKey(name: string, grade: number): string {
   return `tino_companion_memory_${name.trim()}_${grade}`;
 }
 
-function loadCompanionMemory(name: string, grade: number): CompanionMemory {
+/** 每次刷新都从零开始：清空所有已保存的同伴记忆键 */
+function clearAllCompanionMemoryStorage(): void {
   try {
-    const raw = localStorage.getItem(getCompanionMemoryKey(name, grade));
-    if (!raw) return createEmptyCompanionMemory();
-    const parsed = JSON.parse(raw) as Partial<CompanionMemory>;
-    const sanitizedMemories = Array.isArray(parsed.memories)
-      ? parsed.memories
-          .map((item) => toPreferenceMemory(String(item || "")))
-          .filter((item): item is string => Boolean(item))
-          .slice(0, 6)
-      : [];
-    return {
-      ...createEmptyCompanionMemory(),
-      ...parsed,
-      memories: sanitizedMemories,
-    };
+    if (typeof localStorage === "undefined") return;
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith("tino_companion_memory_")) toRemove.push(k);
+    }
+    for (const k of toRemove) localStorage.removeItem(k);
   } catch {
-    return createEmptyCompanionMemory();
+    /* storage unavailable */
   }
 }
 
@@ -632,11 +620,16 @@ export default function Home() {
       if (fl) setFriendsList(JSON.parse(fl));
 
       localStorage.removeItem("tino_user_id");
-      const savedUserId = sessionStorage.getItem("tino_user_id");
+      clearAllCompanionMemoryStorage();
+      try {
+        sessionStorage.removeItem("tino_user_id");
+      } catch {
+        /* ignore */
+      }
       const name = "小明";
       const grade = 1;
-      const memory = loadCompanionMemory(name, grade);
-      const sessionUserId = savedUserId || generateUserId();
+      const memory = createEmptyCompanionMemory();
+      const sessionUserId = generateUserId();
       const greeting = buildCompanionGreeting(name, memory);
       sessionStorage.setItem("tino_user_id", sessionUserId);
       localStorage.setItem("tino_user_name", name);
@@ -1509,7 +1502,8 @@ export default function Home() {
   /* fires when child taps "我会读啦！" on the onboarding reading card */
   const dismissOnboardingReadingCard = useCallback(() => {
     setShowOnboardingReadingCard(false);
-    const shakeIntro = "棒极了！🎉\n想认识更多小朋友吗？\n摇一摇设备就能遇到真实的小伙伴！";
+    const shakeIntro =
+      "太棒了！英文说得真好！🎉\n想认识别的小朋友吗？\n摇一摇设备，就能随机匹配到另一个小朋友，一起用英语聊天哦！";
     setCompanionMsgs((prev) => [
       ...prev,
       { id: "ob_shake", sender: "tino", content: shakeIntro, timestamp: Date.now() },
@@ -1556,11 +1550,12 @@ export default function Home() {
             if (modeRef.current === "companion") setDisplayText(s);
           });
         }
-        /* After step 1: show the sentence in the subtitle area for follow-along */
+        /* After step 2: 弹出跟读卡片；完成后 dismiss 里接「摇一摇匹配」引导 */
         if (i === 1) {
           playTTS("Nice to meet you!", "tino", () => {
             if (modeRef.current === "companion") {
               setDisplayText("Nice to meet you! 🎤\n按住右侧按键跟读一遍");
+              setShowOnboardingReadingCard(true);
             }
           });
         }
@@ -3445,16 +3440,6 @@ export default function Home() {
               再次点击退出聊天
             </div>
           )}
-
-          {/* 房间模式：标题 + 剩余时间（好友留言与匹配聊天区分） */}
-          <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-col items-center gap-0.5 max-w-[72%]">
-            <span className="text-[10px] font-black text-[#1a4a7a] bg-white/70 backdrop-blur-sm px-2.5 py-0.5 rounded-full border border-white/60 shadow-sm text-center leading-tight">
-              英语聊天室
-            </span>
-            <span className="text-[9px] font-bold tabular-nums text-[#2a5a8a]/85">
-              剩余 {formatRoomTime(timeLeft)}
-            </span>
-          </div>
 
           {/* Radial warm stage — softens character edges on sunny background */}
           <div
