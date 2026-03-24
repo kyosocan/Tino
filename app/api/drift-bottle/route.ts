@@ -6,6 +6,7 @@ import {
   getInbox,
   getBottleCount,
 } from "@/lib/bottleStore";
+import { isEnglishOnlyBottleContent } from "@/lib/bottleValidation";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -15,6 +16,12 @@ export async function POST(req: NextRequest) {
     const { userId, senderName, senderGrade, content, audioBase64, mimeType } = body;
     if (!userId || !senderName || !content?.trim()) {
       return NextResponse.json({ error: "Missing params" }, { status: 400 });
+    }
+    if (!isEnglishOnlyBottleContent(content)) {
+      return NextResponse.json(
+        { error: "Bottle content must be English" },
+        { status: 400 }
+      );
     }
     const bottle = throwBottle({
       userId,

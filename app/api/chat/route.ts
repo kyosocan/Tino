@@ -44,10 +44,17 @@ function buildMemoryPrompt(memory?: {
   weaknessNotes?: string[];
   totalMessages?: number;
   totalEnglishTurns?: number;
+  growthStage?: { label: string; shortHint: string };
 }) {
   if (!memory) return "";
 
   const sections: string[] = [];
+
+  if (memory.growthStage) {
+    sections.push(
+      `【你与孩子的成长阶段：${memory.growthStage.label}】${memory.growthStage.shortHint}`
+    );
+  }
 
   if (memory.memories && memory.memories.length > 0) {
     sections.push(
@@ -73,7 +80,7 @@ function buildMemoryPrompt(memory?: {
 
   if (sections.length === 0) return "";
 
-  return `\n\n长期陪伴信息：\n- ${sections.join("\n- ")}\n- 使用这些信息时要自然，像老朋友一样偶尔提起，不要每轮都复述，不要显得像在念档案。`;
+  return `\n\n长期陪伴信息：\n- ${sections.join("\n- ")}\n- 成长阶段与薄弱点类信息要内化在语气里，不要每轮复读标签名；共同记忆可偶尔自然提起，不要像在念档案。`;
 }
 
 const FALLBACK_RESPONSES = [
@@ -103,6 +110,7 @@ export async function POST(req: Request) {
         weaknessNotes?: string[];
         totalMessages?: number;
         totalEnglishTurns?: number;
+        growthStage?: { label: string; shortHint: string };
       };
     } =
       body;

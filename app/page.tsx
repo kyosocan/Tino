@@ -15,6 +15,11 @@ import type {
   MessageSender,
 } from "@/lib/types";
 import { OUTFITS, getOutfit, type OutfitDef } from "@/lib/incentive";
+import { isEnglishOnlyBottleContent } from "@/lib/bottleValidation";
+import {
+  deriveCompanionGrowthStage,
+  type CompanionGrowthStage,
+} from "@/lib/companionGrowth";
 
 /* ───────── constants ───────── */
 
@@ -168,17 +173,44 @@ function getEnglishIfSamePronunciation(text: string): string | null {
   return SAME_PRONUNCIATION_MAP[normalized] ?? null;
 }
 
-function scoreEnglish(text: string): number {
+/** 极常见词：仍按长度计基础分，但不计「生词」额外分 */
+const ENGLISH_POINTS_STOPWORDS = new Set([
+  "the", "a", "an", "is", "are", "am", "be", "been", "was", "were",
+  "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
+  "my", "your", "his", "her", "its", "our", "their",
+  "to", "of", "in", "on", "at", "for", "with", "by", "from", "as",
+  "do", "does", "did", "have", "has", "had",
+  "no", "yes", "ok", "okay", "oh", "so", "and", "or", "but", "not",
+  "hi", "hey", "hello", "bye", "byebye", "thanks", "thank",
+]);
+
+function scoreEnglishTurn(
+  text: string,
+  seenWords: Set<string>
+): { points: number; novelCount: number } {
   const words = text.match(/[a-zA-Z]{2,}/g) || [];
-  if (words.length === 0) return 0;
-  let score = 0;
-  for (const w of words) {
-    if (w.length <= 3) score += 1;
-    else if (w.length <= 6) score += 2;
-    else score += 3;
+  if (words.length === 0) return { points: 0, novelCount: 0 };
+
+  let points = 0;
+  let novelCount = 0;
+
+  for (const raw of words) {
+    const w = raw.toLowerCase();
+    const base = raw.length <= 3 ? 1 : raw.length <= 6 ? 2 : 3;
+    points += base;
+
+    if (!seenWords.has(w)) {
+      seenWords.add(w);
+      if (!ENGLISH_POINTS_STOPWORDS.has(w)) {
+        novelCount += 1;
+        points += 4;
+      }
+    }
   }
-  if (/[A-Z][a-z].*\s[a-z]/.test(text) && words.length >= 3) score += 2;
-  return score;
+
+  if (/[A-Z][a-z].*\s[a-z]/.test(text) && words.length >= 3) points += 2;
+
+  return { points, novelCount };
 }
 
 function generateUserId(): string {
@@ -463,6 +495,9 @@ export default function Home() {
     isLoadingRef.current = isLoading;
   }, [isLoading]);
   const companionMemoryRef = useRef<CompanionMemory>(createEmptyCompanionMemory());
+  const [companionGrowth, setCompanionGrowth] = useState<CompanionGrowthStage>(
+    () => deriveCompanionGrowthStage(createEmptyCompanionMemory())
+  );
 
   /* splash / app ready */
   const [isAppReady, setIsAppReady] = useState(false);
@@ -504,6 +539,8 @@ export default function Home() {
 
   /* post-room debrief */
   const pendingDebriefRef = useRef<string[] | null>(null);
+  /** fetchDebrief 异步写入 pending 后递增，驱动复盘 effect 在数据就绪时再跑 */
+  const [debriefVersion, setDebriefVersion] = useState(0);
 
   /* room */
   const [timeLeft, setTimeLeft] = useState(ROOM_DURATION);
@@ -602,12 +639,15 @@ export default function Home() {
   const [bottleInbox, setBottleInbox] = useState<InboxBottleData[]>([]);
   const [bottleLoading, setBottleLoading] = useState(false);
   const [bottleInboxUnread, setBottleInboxUnread] = useState(0);
+  const [bottleThrowError, setBottleThrowError] = useState<string | null>(null);
 
   /* 积分 + 装扮 */
   const [diamonds, setDiamonds] = useState(0);
   const [diamondDelta, setDiamondDelta] = useState<number | null>(null);
   /** 每次加积分 +1，用于重播轻提示动画 */
   const [pointsHintKey, setPointsHintKey] = useState(0);
+  /** 本会话内已出现过的英文词，用于「生词」额外加分（仅计一次） */
+  const englishWordSeenForPointsRef = useRef<Set<string>>(new Set());
   const [ownedOutfits, setOwnedOutfits] = useState<string[]>(["default"]);
   const [activeOutfit, setActiveOutfit] = useState("default");
 
@@ -646,6 +686,7 @@ export default function Home() {
       setUserName(name);
       setUserGrade(grade);
       companionMemoryRef.current = memory;
+      setCompanionGrowth(deriveCompanionGrowthStage(memory));
       setDisplayText(greeting);
       setCompanionMsgs([
         { id: "g", sender: "tino", content: greeting, timestamp: Date.now() },
@@ -717,19 +758,6 @@ export default function Home() {
     const t = setTimeout(() => setDiamondDelta(null), 1320);
     return () => clearTimeout(t);
   }, [diamondDelta]);
-
-  const awardDiamonds = useCallback((text: string) => {
-    const pts = scoreEnglish(text);
-    if (pts > 0) {
-      if (modeRef.current === "room") {
-        setSessionDiamonds((d) => d + pts);
-      } else {
-        setDiamonds((d) => d + pts);
-      }
-      setPointsHintKey((k) => k + 1);
-      setDiamondDelta(pts);
-    }
-  }, []);
 
   const buyOutfit = useCallback(
     (o: OutfitDef) => {
@@ -827,6 +855,54 @@ export default function Home() {
       }
     }
   }, []);
+
+  /** 加积分时短促提示音；有生词额外分时多一声更高音 */
+  const playPointsDing = useCallback((novelCount: number) => {
+    unlockAudioSync();
+    const ctx = audioCtxRef.current;
+    const master = gainNodeRef.current;
+    if (!ctx || !master) return;
+
+    const ding = (freq: number, startOffset: number) => {
+      const t0 = ctx.currentTime + startOffset;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.setValueAtTime(freq, t0);
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(0.11, t0 + 0.006);
+      g.gain.linearRampToValueAtTime(0.001, t0 + 0.13);
+      o.connect(g);
+      g.connect(master);
+      o.start(t0);
+      o.stop(t0 + 0.14);
+    };
+
+    ding(880, 0);
+    if (novelCount > 0) {
+      ding(1046, 0.14);
+    }
+  }, [unlockAudioSync]);
+
+  const awardDiamonds = useCallback(
+    (text: string) => {
+      const { points, novelCount } = scoreEnglishTurn(
+        text,
+        englishWordSeenForPointsRef.current
+      );
+      if (points <= 0) return;
+
+      if (modeRef.current === "room") {
+        setSessionDiamonds((d) => d + points);
+      } else {
+        setDiamonds((d) => d + points);
+      }
+      setPointsHintKey((k) => k + 1);
+      setDiamondDelta(points);
+      playPointsDing(novelCount);
+    },
+    [playPointsDing]
+  );
 
   useEffect(() => {
     volumeRef.current = volume;
@@ -1140,6 +1216,8 @@ export default function Home() {
         );
         companionMemoryRef.current = nextMemory;
         persistCompanionMemory(userName, userGrade, nextMemory);
+        const growth = deriveCompanionGrowthStage(nextMemory);
+        setCompanionGrowth(growth);
 
         const history = [
           ...companionMsgs.slice(-16),
@@ -1161,6 +1239,10 @@ export default function Home() {
               weaknessNotes: deriveWeaknessNotes(nextMemory),
               totalMessages: nextMemory.totalMessages,
               totalEnglishTurns: nextMemory.totalEnglishTurns,
+              growthStage: {
+                label: growth.label,
+                shortHint: growth.shortHint,
+              },
             },
           }),
         });
@@ -1692,7 +1774,7 @@ export default function Home() {
     });
 
     return () => timers.forEach(clearTimeout);
-  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, debriefVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ─── room: icebreaker warmup ─── */
 
@@ -1828,9 +1910,18 @@ export default function Home() {
           if (modeRef.current === "bottle") {
             const bs = bottleSubStateRef.current;
             if (bs === "throw_input") {
-              setBottleInput(text || "");
-              setBottleAudioBase64(b64);
-              setBottleAudioMime(actualMime);
+              const t = (text || "").trim();
+              if (t && !isEnglishOnlyBottleContent(t)) {
+                setBottleThrowError("漂流瓶请用英文哦～");
+                setBottleInput("");
+                setBottleAudioBase64("");
+                setBottleAudioMime("");
+              } else {
+                setBottleThrowError(null);
+                setBottleInput(t);
+                setBottleAudioBase64(b64);
+                setBottleAudioMime(actualMime);
+              }
             } else if (bs === "replying") {
               setBottleReplyInput(text || "");
             }
@@ -1934,6 +2025,7 @@ export default function Home() {
       const data = await res.json();
       if (Array.isArray(data.parts) && data.parts.length > 0) {
         pendingDebriefRef.current = data.parts as string[];
+        setDebriefVersion((v) => v + 1);
       }
     } catch { /* silent */ }
   }, [userName]);
@@ -2002,18 +2094,18 @@ export default function Home() {
     [userName, prefetchTTS]
   );
 
-  /* ─── enter AI room after 10s timeout ─── */
+  /* ─── enter AI room after 5s timeout (no real match) ─── */
   const AI_PARTNER_NAMES = ["Mochi", "小A", "Kiki", "小星", "晴晴"];
 
   const enterAiRoom = useCallback(() => {
     const name = AI_PARTNER_NAMES[Math.floor(Math.random() * AI_PARTNER_NAMES.length)];
     const aiPartner: RoomPartner = { userId: "ai_partner", name, grade: 0 };
     setMatchingPhase("ai_found");
+    setPartner(aiPartner);
     setTimeout(async () => {
       setIsAiRoom(true);
       isAiRoomRef.current = true;
       setRoomId("ai_room");
-      setPartner(aiPartner);
       setRoomMsgs([]);
       setTimeLeft(ROOM_DURATION);
       setEnglishCount(0);
@@ -2041,12 +2133,12 @@ export default function Home() {
     setMatchingPhase("waiting");
     setMode("matching");
 
-    /* after 10s with no real match → arrange an AI partner */
+    /* after 5s with no real match → arrange an AI partner */
     matchTimeoutRef.current = setTimeout(() => {
       if (matchPollRef.current) clearInterval(matchPollRef.current);
       notifyMatchLeave(userId);
       enterAiRoom();
-    }, 10000);
+    }, 5000);
 
     try {
       const res = await fetch("/api/match", {
@@ -2064,6 +2156,7 @@ export default function Home() {
       if (data.matched && data.roomId && data.partner) {
         clearTimeout(matchTimeoutRef.current);
         setMatchingPhase("ai_found");
+        setPartner(data.partner);
         setTimeout(() => enterRoom(data.roomId, data.partner), 1500);
         return;
       }
@@ -2267,7 +2360,7 @@ export default function Home() {
     centerSpeaker === "tino"
       ? "Tino"
       : centerSpeaker === "ai_buddy"
-        ? (aiBuddyName || "Buddy")
+        ? (aiBuddyName || "布迪")
         : centerSpeaker === "user"
           ? (userName || "我")
           : partner?.name || "小伙伴";
@@ -2314,11 +2407,16 @@ export default function Home() {
 
   const handleThrowBottle = useCallback(async () => {
     if (!bottleInput.trim() || bottleLoading) return;
+    if (!isEnglishOnlyBottleContent(bottleInput)) {
+      setBottleThrowError("漂流瓶请用英文哦～");
+      return;
+    }
+    setBottleThrowError(null);
     setBottleLoading(true);
     setBottleSubState("throwing");
     await new Promise((r) => setTimeout(r, 1200));
     try {
-      await fetch("/api/drift-bottle", {
+      const res = await fetch("/api/drift-bottle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2331,6 +2429,13 @@ export default function Home() {
           mimeType: bottleAudioMime || undefined,
         }),
       });
+      if (!res.ok) {
+        setBottleThrowError(
+          res.status === 400 ? "漂流瓶请用英文哦～" : "发送失败，请稍后再试"
+        );
+        setBottleSubState("throw_input");
+        return;
+      }
       setBottleSubState("throw_done");
       setBottleInput("");
       setBottleAudioBase64("");
@@ -2479,6 +2584,10 @@ export default function Home() {
                     setFriendsList(updated);
                   } catch { /* storage unavailable */ }
                   setFriendInvitePartner(null);
+                  /* 在聊天室中加好友：保存后直接离房，回陪伴态并由 fetchDebrief + 复盘 effect 总结刚才聊天 */
+                  if (mode === "room") {
+                    leaveRoom();
+                  }
                 }}
                 className="w-full py-2.5 rounded-lg bg-[#6b2f9a] text-white text-[12px] font-black active:brightness-95 border border-[#4a2068]"
               >
@@ -2536,37 +2645,163 @@ export default function Home() {
           <TinoAvatar size={48} expression="happy" className="opacity-10" />
         </div>
       ) : (mode === "matching" || (mode === "room" && !roomReady)) ? (
-        /* ── matching：寻找中 / 已匹配（进房等破冰；好友「留言」进房会直接 roomReady，不经此屏） ── */
-        <div className="h-full bg-gradient-to-b from-tino-orange/80 to-tino-blue/60 flex flex-col items-center justify-center gap-4 text-white text-center px-4">
-          {matchingPhase === "ai_found" || (mode === "room" && !roomReady) ? (
-            /* partner found：预拉 TTS / 破冰前也保持此屏 */
-            <>
-              <p className="text-lg font-bold animate-pulse-soft">找到小伙伴了！</p>
-              <p className="text-sm opacity-80">马上开始聊天～</p>
-            </>
-          ) : (
-            <>
-              <p className="text-lg font-bold animate-pulse-soft">
-                Let&apos;s find a friend!
-              </p>
-              <p className="text-sm opacity-80">正在寻找小伙伴...</p>
-              <div className="flex gap-2">
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="w-2.5 h-2.5 rounded-full bg-white animate-bounce"
-                    style={{ animationDelay: `${i * 200}ms` }}
-                  />
-                ))}
-              </div>
-              <button
-                onClick={cancelMatch}
-                className="mt-2 px-4 py-1.5 rounded-full bg-white/20 text-white text-xs font-bold active:bg-white/30 transition-colors"
-              >
-                取消匹配
-              </button>
-            </>
-          )}
+        /* ── matching：上排我+Tino；匹配前下排「?」，成功后下排小伙伴+布迪人像铺满 ── */
+        <div className="h-full relative overflow-hidden rounded-[8px] flex flex-col min-h-0">
+          <div
+            className="absolute inset-0"
+            aria-hidden
+            style={{
+              background:
+                "radial-gradient(ellipse 100% 70% at 50% -15%, rgba(120,80,220,0.45), transparent 50%), radial-gradient(ellipse 80% 50% at 50% 100%, rgba(30,140,200,0.22), transparent 45%), linear-gradient(180deg, #0a0e22 0%, #12183a 45%, #070a18 100%)",
+            }}
+          />
+          <div
+            className="absolute inset-0 opacity-[0.08] pointer-events-none"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(-45deg, transparent, transparent 8px, rgba(201,162,39,0.1) 8px, rgba(201,162,39,0.1) 9px)",
+            }}
+          />
+          <div className="relative z-10 flex h-full min-h-0 flex-col">
+            {(() => {
+              const matchReady =
+                matchingPhase === "ai_found" || (mode === "room" && !roomReady);
+              const showBottomAvatars = matchReady && partner;
+              /* 左上我 · 右上 Tino · 下：匹配成功前 ? / 成功后 小伙伴+布迪 */
+              const cells: (
+                | {
+                    kind: "avatar";
+                    key: string;
+                    img: typeof portraitUser;
+                    name: string;
+                    dim?: boolean;
+                    mySide: boolean;
+                  }
+                | { kind: "placeholder"; key: string }
+              )[] = [
+                {
+                  kind: "avatar",
+                  key: "me",
+                  img: portraitUser,
+                  name: userName || "我",
+                  dim: false,
+                  mySide: true,
+                },
+                {
+                  kind: "avatar",
+                  key: "tino",
+                  img: tinoPortrait,
+                  name: "Tino",
+                  dim: false,
+                  mySide: true,
+                },
+                ...(showBottomAvatars
+                  ? [
+                      {
+                        kind: "avatar" as const,
+                        key: "peer",
+                        img: portraitPartner,
+                        name: partner!.name || "…",
+                        dim: false,
+                        mySide: false,
+                      },
+                      {
+                        kind: "avatar" as const,
+                        key: "buddy",
+                        img: portraitBuddy,
+                        name: aiBuddyName || "布迪",
+                        dim: false,
+                        mySide: false,
+                      },
+                    ]
+                  : [
+                      { kind: "placeholder" as const, key: "q1" },
+                      { kind: "placeholder" as const, key: "q2" },
+                    ]),
+              ];
+              return (
+                <>
+                  <main className="min-h-0 flex-1 overflow-hidden">
+                    <div className="grid h-full min-h-0 grid-cols-2 grid-rows-2 gap-px bg-slate-950/80">
+                      {cells.map((cell) => {
+                        if (cell.kind === "placeholder") {
+                          return (
+                            <div
+                              key={cell.key}
+                              className="relative flex min-h-0 min-w-0 flex-col items-center justify-center overflow-hidden border-2 border-slate-700/90 bg-gradient-to-b from-slate-900/95 to-slate-950 shadow-inner"
+                            >
+                              <span className="select-none text-[min(28vw,96px)] font-black leading-none text-slate-600/85">
+                                ?
+                              </span>
+                            </div>
+                          );
+                        }
+                        const cardFrame = cell.mySide
+                          ? "border-2 border-amber-400/95 shadow-[0_0_16px_rgba(251,191,36,0.22)]"
+                          : cell.key === "peer"
+                            ? "border-2 border-amber-400/90 shadow-[0_0_14px_rgba(251,191,36,0.2)]"
+                            : "border border-slate-500/60 bg-slate-950/25";
+                        return (
+                          <div
+                            key={cell.key}
+                            className={`relative min-h-0 min-w-0 overflow-hidden ${cardFrame} ${
+                              cell.dim ? "opacity-[0.97]" : ""
+                            }`}
+                          >
+                            <Image
+                              src={cell.img}
+                              alt=""
+                              fill
+                              className={`object-cover object-top ${
+                                cell.dim ? "brightness-[0.48] saturate-45" : ""
+                              }`}
+                              sizes="50vw"
+                              priority={cell.key === "me"}
+                            />
+                            {cell.dim && (
+                              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/35">
+                                <span className="text-[11px] font-black tracking-[0.2em] text-white drop-shadow-md">
+                                  匹配中
+                                </span>
+                              </div>
+                            )}
+                            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent pt-6 pb-1.5 px-1.5">
+                              <p className="truncate text-center text-[12px] font-black leading-tight text-white drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
+                                {cell.name}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </main>
+
+                  {!matchReady && (
+                    <footer className="shrink-0 border-t border-white/10 bg-[#070a18]/95 px-3 py-2">
+                      <div className="flex items-center justify-center gap-3">
+                        <div className="flex gap-1.5" aria-hidden>
+                          {[0, 1, 2].map((i) => (
+                            <span
+                              key={i}
+                              className="h-1.5 w-1.5 animate-bounce rounded-full bg-amber-400/90 shadow-[0_0_6px_rgba(251,191,36,0.45)]"
+                              style={{ animationDelay: `${i * 180}ms` }}
+                            />
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={cancelMatch}
+                          className="min-w-0 flex-1 rounded-lg border border-amber-400/35 bg-amber-400/12 py-2 text-[11px] font-black text-amber-50/95 transition-colors active:bg-amber-400/20 sm:max-w-[200px]"
+                        >
+                          取消匹配
+                        </button>
+                      </div>
+                    </footer>
+                  )}
+                </>
+              );
+            })()}
+          </div>
         </div>
       ) : mode === "companion" ? (
         /* ── companion: portrait — character center, chat overlay bottom ── */
@@ -2854,6 +3089,16 @@ export default function Home() {
             </div>
           </div>
 
+          {/* 伙伴等级（头顶；tier 0–3 → Lv.1–4，随英文输出提升） */}
+          <div className="absolute top-[14%] left-0 right-0 z-20 flex justify-center pointer-events-none px-2">
+            <span
+              className="text-[12px] font-black tabular-nums tracking-tight text-amber-950 bg-gradient-to-b from-amber-100 via-amber-200 to-amber-300/95 border border-amber-500/50 rounded-md px-2 py-0.5 shadow-[0_2px_8px_rgba(0,0,0,0.2)]"
+              title={`等级 Lv.${companionGrowth.tier + 1} · ${companionGrowth.label}（多说英文会升级）`}
+            >
+              Lv.{companionGrowth.tier + 1}
+            </span>
+          </div>
+
           {/* BOTTOM chat overlay：积分提示全宽水平居中（不受左右 padding 影响） */}
           <div className="absolute bottom-0 inset-x-0 z-10 pb-2.5 flex flex-col gap-1.5">
             {diamondDelta !== null && (
@@ -3067,6 +3312,7 @@ export default function Home() {
                       setBottleInput("");
                       setBottleAudioBase64("");
                       setBottleAudioMime("");
+                      setBottleThrowError(null);
                     }}
                     className="btn-kid w-full min-h-[58px] rounded-[24px] flex items-center justify-center px-4"
                     style={{
@@ -3143,9 +3389,18 @@ export default function Home() {
                       <p className="text-white/85 text-[13px] font-bold text-center leading-snug">
                         按住侧面按钮说话吧！
                       </p>
+                      <p className="text-white/55 text-[11px] font-semibold text-center mt-1">
+                        漂流瓶请用英文哦
+                      </p>
                     </div>
                   )}
                 </div>
+
+                {bottleThrowError && (
+                  <p className="text-[#ffccc8] text-[12px] font-bold text-center px-4 -mt-2">
+                    {bottleThrowError}
+                  </p>
+                )}
 
                 {bottleInput && (
                   <div className="flex flex-nowrap justify-center items-stretch gap-2 px-2 w-full max-w-[320px] mx-auto">
@@ -3155,6 +3410,7 @@ export default function Home() {
                         setBottleInput("");
                         setBottleAudioBase64("");
                         setBottleAudioMime("");
+                        setBottleThrowError(null);
                       }}
                       className="btn-kid flex-none w-[36%] min-h-[40px] px-2 text-white/85 text-[12px] font-bold rounded-2xl bg-white/10 active:bg-white/20 transition-colors"
                     >
@@ -3545,7 +3801,7 @@ export default function Home() {
             {centerSpeaker === "tino" ? (
               <Image
                 src={portraitBuddy}
-                alt="Buddy"
+                alt="布迪"
                 fill
                 sizes="210px"
                 className="object-contain"
@@ -3636,7 +3892,7 @@ export default function Home() {
               const cardName = isTino
                 ? "Tino"
                 : isBuddy
-                ? (aiBuddyName || "Buddy")
+                ? (aiBuddyName || "布迪")
                 : isUser
                 ? (userName || "我")
                 : (partner?.name || "小伙伴");
