@@ -75,7 +75,7 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
         needSupport: difficulty === 'easy',
       };
 
-      const res = await fetch('/api/test-llm', {
+      const res = await fetch('/api/luna_talk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
