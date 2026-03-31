@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useState, useEffect, useRef, useCallback } from "react";
 import DeviceFrame from "@/components/DeviceFrame";
 import TinoAvatar from "@/components/TinoAvatar";
+import TestChatPanel from "@/components/TestChatPanel";
 import tinoPortrait from "@/scripts/ai_api/人物像.png";
 import portraitUser from "@/scripts/ai_api/User1.png";
 import portraitPartner from "@/scripts/ai_api/partner2.png";
@@ -2528,16 +2529,27 @@ export default function Home() {
   /* ─── render ─── */
 
   return (
-    <DeviceFrame
-      onVoiceStart={startRecording}
-      onVoiceEnd={stopRecording}
-      onVolumeUp={handleVolumeUp}
-      onVolumeDown={handleVolumeDown}
-      onPower={handlePower}
-      isRecording={isRecording}
-      isSpeaking={isSpeaking}
-    >
-      <div className="h-full min-h-0 relative">
+    <>
+      {/* Test Chat Panel - visible in development only */}
+      {process.env.NODE_ENV === 'development' && (
+        <TestChatPanel
+          defaultOpen={true}
+          onTestComplete={(results) => {
+            console.log('Test completed:', results);
+          }}
+        />
+      )}
+
+      <DeviceFrame
+        onVoiceStart={startRecording}
+        onVoiceEnd={stopRecording}
+        onVolumeUp={handleVolumeUp}
+        onVolumeDown={handleVolumeDown}
+        onPower={handlePower}
+        isRecording={isRecording}
+        isSpeaking={isSpeaking}
+      >
+        <div className="h-full min-h-0 relative">
       {friendInvitePartner && (
         <div
           className="absolute inset-0 z-[200] bg-black/70 flex items-center justify-center px-2"
@@ -3961,6 +3973,7 @@ export default function Home() {
         </div>
       )}
       </div>
-    </DeviceFrame>
+      </DeviceFrame>
+    </>
   );
 }
