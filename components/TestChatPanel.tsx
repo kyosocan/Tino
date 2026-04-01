@@ -2,13 +2,11 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 
-interface TestMessage {
+interface ChatMessage {
   id: string;
-  type: 'user' | 'ai' | 'system';
+  role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
-  mode?: string;
-  response?: any;
 }
 
 interface TestChatPanelProps {
@@ -18,15 +16,25 @@ interface TestChatPanelProps {
 
 export default function TestChatPanel({ defaultOpen = true, onTestComplete }: TestChatPanelProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
-  const [messages, setMessages] = useState<TestMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [currentMode, setCurrentMode] = useState('ai_turn');
-  const [difficulty, setDifficulty] = useState('easy');
-  const [playerName, setPlayerName] = useState('Test User');
-  const [turnIndex, setTurnIndex] = useState(0);
-  const [theme, setTheme] = useState('Daily Talk');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [systemPrompt, setSystemPrompt] = useState(`你是 Luna，一个友好的 AI 聊天助手。
+
+性格特点：
+- 温暖友好，像一个好朋友
+- 耐心倾听，积极回应
+- 说话简洁自然
+- 偶尔会用一些可爱的表情符号
+
+聊天规则：
+1. 保持对话流畅自然
+2. 用简单易懂的语言
+3. 多用疑问句保持对话活跃
+4. 回复控制在 2-3 句话
+5. 可以适当使用表情符号，但不要太多
+6. 根据上下文保持话题的连贯性`);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -36,27 +44,14 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
     scrollToBottom();
   }, [messages]);
 
-  const addSystemMessage = (content: string) => {
-    setMessages(prev => [
-      ...prev,
-      {
-        id: `system-${Date.now()}`,
-        type: 'system',
-        content,
-        timestamp: new Date(),
-      },
-    ]);
-  };
-
-  const sendTestMessage = async () => {
+  const sendMessage = async () => {
     if (!inputText.trim() || isLoading) return;
 
-    const userMessage: TestMessage = {
+    const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
-      type: 'user',
+      role: 'user',
       content: inputText,
       timestamp: new Date(),
-      mode: currentMode,
     };
 
     setMessages(prev => [...prev, userMessage]);
@@ -64,60 +59,50 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
     setInputText('');
 
     try {
-      const body: any = {
-        mode: currentMode as any,
-        theme,
-        difficulty: difficulty as any,
-        playerName,
-        transcript: inputText,
-        turnIndex,
-        tasks: ['test', 'debug'],
-        needSupport: difficulty === 'easy',
-      };
+      // 构建 history：只传递 user/assistant 消息，不包含当前这条（会在 API 处理）
+      const historyForApi = messages.map(m => ({
+        role: m.role,
+        content: m.content,
+      }));
 
       const res = await fetch('/api/luna_talk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          messages: [...historyForApi, { role: 'user' as const, content: userMessage.content }],
+          systemPrompt: systemPrompt || undefined,
+        }),
       });
 
       if (!res.ok) {
         throw new Error(`API request failed: ${res.status}`);
       }
 
-      const response = await res.json();
+      const data = await res.json();
+      const aiContent = data.reply || '抱歉，我走神了，请再说一次～';
 
-      let aiContent = '';
-      const data = response as any;
-      if (currentMode === 'room_intro') {
-        aiContent = data.intro || '';
-      } else if (currentMode === 'host_turn') {
-        aiContent = data.hostPrompt || '';
-      } else if (currentMode === 'coach') {
-        aiContent = data.aiReply || data.hostPrompt || '';
-      } else if (currentMode === 'ai_turn') {
-        aiContent = data.aiReply || '';
-      }
-
-      const aiMessage: TestMessage = {
+      const aiMessage: ChatMessage = {
         id: `ai-${Date.now()}`,
-        type: 'ai',
+        role: 'assistant',
         content: aiContent,
         timestamp: new Date(),
-        mode: currentMode,
-        response,
       };
 
       setMessages(prev => [...prev, aiMessage]);
-      setTurnIndex(prev => prev + 1);
 
       if (onTestComplete) {
-        onTestComplete({ mode: currentMode, request: body, response });
+        onTestComplete({ userMessage, aiMessage });
       }
 
     } catch (error) {
-      console.error('Test error:', error);
-      addSystemMessage(`❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('Chat error:', error);
+      const errorMessage: ChatMessage = {
+        id: `error-${Date.now()}`,
+        role: 'assistant',
+        content: `❌ 出错了: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
     }
@@ -126,20 +111,12 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendTestMessage();
+      sendMessage();
     }
   };
 
-  const resetTestSession = () => {
+  const clearChat = () => {
     setMessages([]);
-    setTurnIndex(0);
-    setInputText('');
-    addSystemMessage('🔄 Test session reset');
-  };
-
-  const clearHistory = () => {
-    setMessages([]);
-    addSystemMessage('🗑️ Chat history cleared');
   };
 
   return (
@@ -147,10 +124,10 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
       {/* Toggle Button - Top Right */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="fixed top-4 right-4 z-50 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg shadow-lg transition-all duration-300 flex items-center gap-2"
+        className="fixed top-4 right-4 z-50 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg shadow-lg transition-all duration-300 flex items-center gap-2"
       >
-        <span>🧪</span>
-        <span>测试</span>
+        <span>🌙</span>
+        <span>Luna Talk</span>
       </button>
 
       {/* Overlay */}
@@ -178,94 +155,29 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
             </button>
 
             {/* Sidebar - Configuration */}
-            <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col p-4 overflow-y-auto">
+            <div className="w-72 bg-gray-50 border-r border-gray-200 flex flex-col p-4 overflow-y-auto">
               <h3 className="text-sm font-bold text-gray-700 mb-4">⚙️ 配置</h3>
 
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    对话模式
+                    System Prompt
                   </label>
-                  <select
-                    value={currentMode}
-                    onChange={(e) => setCurrentMode(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                  >
-                    <option value="ai_turn">AI 伙伴回复</option>
-                    <option value="coach">教练指导</option>
-                    <option value="host_turn">主持人提问</option>
-                    <option value="room_intro">房间介绍</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    难度
-                  </label>
-                  <select
-                    value={difficulty}
-                    onChange={(e) => setDifficulty(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                  >
-                    <option value="easy">简单</option>
-                    <option value="medium">中等</option>
-                    <option value="hard">困难</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    回合索引
-                  </label>
-                  <input
-                    type="number"
-                    value={turnIndex}
-                    onChange={(e) => setTurnIndex(parseInt(e.target.value) || 0)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                    min="0"
-                    max="20"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    玩家姓名
-                  </label>
-                  <input
-                    type="text"
-                    value={playerName}
-                    onChange={(e) => setPlayerName(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                    placeholder="Test User"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    对话主题
-                  </label>
-                  <input
-                    type="text"
-                    value={theme}
-                    onChange={(e) => setTheme(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                    placeholder="Daily Talk"
+                  <textarea
+                    value={systemPrompt}
+                    onChange={(e) => setSystemPrompt(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 text-xs resize-none"
+                    rows={12}
                   />
                 </div>
               </div>
 
-              <div className="mt-auto pt-4 space-y-2">
+              <div className="mt-auto pt-4">
                 <button
-                  onClick={resetTestSession}
-                  className="w-full px-3 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-md text-xs font-medium transition-colors"
-                >
-                  🔄 重置会话
-                </button>
-                <button
-                  onClick={clearHistory}
+                  onClick={clearChat}
                   className="w-full px-3 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-md text-xs font-medium transition-colors"
                 >
-                  🗑️ 清空记录
+                  🗑️ 清空对话
                 </button>
               </div>
             </div>
@@ -273,36 +185,26 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
             {/* Main Chat Area */}
             <div className="flex-1 flex flex-col bg-white">
               {/* Header */}
-              <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-4">
+              <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-4">
                 <h3 className="text-lg font-bold flex items-center gap-2">
-                  🧪 测试聊天面板
+                  🌙 Luna Talk
                   <span className="text-xs opacity-75">v2.0</span>
                 </h3>
-                <p className="text-xs mt-1 opacity-90">模式: {currentMode} | 难度: {difficulty}</p>
+                <p className="text-xs mt-1 opacity-90">简单的多轮对话测试</p>
               </div>
 
               {/* Message List */}
               <div className="flex-1 overflow-y-auto p-4 bg-gradient-to-b from-gray-50 to-gray-100">
                 {messages.length === 0 ? (
                   <div className="text-center text-gray-400 p-8 mt-20">
-                    <div className="text-5xl mb-4">💬</div>
-                    <p className="text-sm">发送消息开始测试</p>
-                    <p className="text-xs mt-1">在左侧调整配置参数</p>
+                    <div className="text-5xl mb-4">🌙</div>
+                    <p className="text-sm">你好，我是 Luna！</p>
+                    <p className="text-xs mt-1">发消息开始聊天吧～</p>
                   </div>
                 ) : (
                   <div className="space-y-4">
                     {messages.map((message) => {
-                      if (message.type === 'system') {
-                        return (
-                          <div key={message.id} className="flex justify-center">
-                            <span className="text-xs text-gray-500 bg-gray-200 px-3 py-1 rounded-full">
-                              {message.content}
-                            </span>
-                          </div>
-                        );
-                      }
-
-                      const isUser = message.type === 'user';
+                      const isUser = message.role === 'user';
                       return (
                         <div
                           key={message.id}
@@ -311,7 +213,7 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
                           <div
                             className={`max-w-[70%] rounded-2xl px-4 py-3 shadow-sm ${
                               isUser
-                                ? 'bg-blue-500 text-white rounded-tr-none'
+                                ? 'bg-purple-500 text-white rounded-tr-none'
                                 : 'bg-white text-gray-800 rounded-tl-none border border-gray-200'
                             }`}
                           >
@@ -319,7 +221,7 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
                               {message.content}
                             </div>
                             <div
-                              className={`text-xs mt-1 ${isUser ? 'text-blue-100' : 'text-gray-400'} text-right`}
+                              className={`text-xs mt-1 ${isUser ? 'text-purple-100' : 'text-gray-400'} text-right`}
                             >
                               {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </div>
@@ -354,15 +256,15 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyPress}
-                    placeholder="输入测试消息..."
-                    className="flex-1 px-4 py-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm resize-none"
+                    placeholder="输入消息..."
+                    className="flex-1 px-4 py-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm resize-none"
                     rows={1}
                     style={{ minHeight: '48px', maxHeight: '120px' }}
                   />
                   <button
-                    onClick={sendTestMessage}
+                    onClick={sendMessage}
                     disabled={!inputText.trim() || isLoading}
-                    className="px-5 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-full transition-colors flex items-center justify-center"
+                    className="px-5 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-full transition-colors flex items-center justify-center"
                   >
                     {isLoading ? '⏳' : '➤'}
                   </button>
