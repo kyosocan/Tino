@@ -9,6 +9,18 @@ interface ChatMessage {
   timestamp: Date;
 }
 
+interface AnalysisResult {
+  mode: string;
+  context: string;
+  reasoning: string;
+}
+
+interface MemoryItem {
+  name: string;
+  description: string;
+  content: string;
+}
+
 interface TestChatPanelProps {
   defaultOpen?: boolean;
   onTestComplete?: (results: any) => void;
@@ -19,22 +31,9 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [systemPrompt, setSystemPrompt] = useState(`你是 Luna，一个友好的 AI 聊天助手。
-
-性格特点：
-- 温暖友好，像一个好朋友
-- 耐心倾听，积极回应
-- 说话简洁自然
-- 偶尔会用一些可爱的表情符号
-
-聊天规则：
-1. 保持对话流畅自然
-2. 用简单易懂的语言
-3. 多用疑问句保持对话活跃
-4. 回复控制在 2-3 句话
-5. 可以适当使用表情符号，但不要太多
-6. 根据上下文保持话题的连贯性`);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -43,6 +42,24 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchMemories();
+    }
+  }, [isOpen]);
+
+  const fetchMemories = async () => {
+    try {
+      const res = await fetch('/api/luna_talk/memories');
+      if (res.ok) {
+        const data = await res.json();
+        setMemories(data.memories || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch memories:', error);
+    }
+  };
 
   const sendMessage = async () => {
     if (!inputText.trim() || isLoading) return;
@@ -59,7 +76,6 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
     setInputText('');
 
     try {
-      // 构建 history：只传递 user/assistant 消息，不包含当前这条（会在 API 处理）
       const historyForApi = messages.map(m => ({
         role: m.role,
         content: m.content,
@@ -70,7 +86,6 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: [...historyForApi, { role: 'user' as const, content: userMessage.content }],
-          systemPrompt: systemPrompt || undefined,
         }),
       });
 
@@ -80,6 +95,15 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
 
       const data = await res.json();
       const aiContent = data.reply || '抱歉，我走神了，请再说一次～';
+
+      if (data.analysis) {
+        console.log('📊 Luna 分析结果:', data.analysis);
+        setCurrentAnalysis(data.analysis);
+      }
+
+      if (data.finalPrompt) {
+        console.log('📝 回复 LLM 最终 Prompt:', data.finalPrompt);
+      }
 
       const aiMessage: ChatMessage = {
         id: `ai-${Date.now()}`,
@@ -117,11 +141,11 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
 
   const clearChat = () => {
     setMessages([]);
+    setCurrentAnalysis(null);
   };
 
   return (
     <>
-      {/* Toggle Button - Top Right */}
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="fixed top-4 right-4 z-50 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg shadow-lg transition-all duration-300 flex items-center gap-2"
@@ -130,7 +154,6 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
         <span>Luna Talk</span>
       </button>
 
-      {/* Overlay */}
       {isOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/50"
@@ -138,15 +161,13 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
         />
       )}
 
-      {/* Chat Panel - Centered Modal */}
       {isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
             className="relative bg-white shadow-2xl rounded-2xl shadow-lg transition-all duration-300 flex"
-            style={{ width: '900px', height: '70vh', maxHeight: '90vh' }}
+            style={{ width: '1200px', height: '75vh', maxHeight: '90vh' }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Close button */}
             <button
               onClick={() => setIsOpen(false)}
               className="absolute top-3 right-3 z-10 w-7 h-7 bg-gray-100 hover:bg-gray-200 rounded-full flex items-center justify-center text-gray-600 text-sm"
@@ -154,46 +175,88 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
               ✕
             </button>
 
-            {/* Sidebar - Configuration */}
-            <div className="w-72 bg-gray-50 border-r border-gray-200 flex flex-col p-4 overflow-y-auto">
-              <h3 className="text-sm font-bold text-gray-700 mb-4">⚙️ 配置</h3>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    System Prompt
-                  </label>
-                  <textarea
-                    value={systemPrompt}
-                    onChange={(e) => setSystemPrompt(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 text-xs resize-none"
-                    rows={12}
-                  />
-                </div>
+            {/* 左侧边栏 - 分析信息 */}
+            <div className="w-64 bg-gradient-to-b from-purple-50 to-gray-50 border-r border-gray-200 flex flex-col overflow-hidden">
+              <div className="p-4 border-b border-gray-200 bg-purple-600 h-[68px] flex items-center">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  📊 分析信息
+                </h3>
               </div>
 
-              <div className="mt-auto pt-4">
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                <div>
+                  <h4 className="text-xs font-semibold text-purple-700 mb-2 flex items-center gap-1">
+                    🎭 当前模式
+                  </h4>
+                  <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                    {currentAnalysis ? (
+                      <span className="text-sm font-medium text-gray-800">
+                        {currentAnalysis.mode}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-400">发送消息后显示</span>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-xs font-semibold text-purple-700 mb-2 flex items-center gap-1">
+                    👤 人设
+                  </h4>
+                  <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                    <span className="text-sm text-gray-700">Luna - 12岁英语学习伙伴</span>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-xs font-semibold text-purple-700 mb-2 flex items-center gap-1">
+                    📋 调用的内容
+                  </h4>
+                  <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                    {currentAnalysis && currentAnalysis.context ? (
+                      <div className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-purple-400"></span>
+                        <span className="text-xs text-gray-800">
+                          {currentAnalysis.context}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-400">无</span>
+                    )}
+                  </div>
+                </div>
+
+                {currentAnalysis && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-purple-700 mb-2 flex items-center gap-1">
+                      💭 分析理由
+                    </h4>
+                    <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                      <p className="text-xs text-gray-600">{currentAnalysis.reasoning}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 border-t border-gray-200 bg-gray-50">
                 <button
                   onClick={clearChat}
-                  className="w-full px-3 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-md text-xs font-medium transition-colors"
+                  className="w-full px-3 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-md text-xs font-medium transition-colors flex items-center justify-center gap-1"
                 >
                   🗑️ 清空对话
                 </button>
               </div>
             </div>
 
-            {/* Main Chat Area */}
+            {/* 中间 - 聊天区域 */}
             <div className="flex-1 flex flex-col bg-white">
-              {/* Header */}
-              <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-4">
+              <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-4 h-[68px] flex items-center border-b border-gray-200">
                 <h3 className="text-lg font-bold flex items-center gap-2">
                   🌙 Luna Talk
-                  <span className="text-xs opacity-75">v2.0</span>
+                  <span className="text-xs opacity-75">v3.0</span>
                 </h3>
-                <p className="text-xs mt-1 opacity-90">简单的多轮对话测试</p>
               </div>
 
-              {/* Message List */}
               <div className="flex-1 overflow-y-auto p-4 bg-gradient-to-b from-gray-50 to-gray-100">
                 {messages.length === 0 ? (
                   <div className="text-center text-gray-400 p-8 mt-20">
@@ -249,7 +312,6 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* Input Area */}
               <div className="p-4 border-t border-gray-200 bg-white">
                 <div className="flex gap-3 items-end">
                   <textarea
@@ -272,6 +334,49 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
                 <div className="text-xs text-gray-400 mt-2 text-center">
                   💡 按 Enter 发送消息
                 </div>
+              </div>
+            </div>
+
+            {/* 右侧边栏 - 用户记忆 */}
+            <div className="w-56 bg-gradient-to-b from-purple-50 to-gray-50 border-l border-gray-200 flex flex-col overflow-hidden">
+              <div className="p-4 border-b border-gray-200 bg-purple-600 h-[68px] flex items-center">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  🧠 用户记忆
+                </h3>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4">
+                {memories.length > 0 ? (
+                  <div className="space-y-3">
+                    {memories.map((memory, i) => (
+                      <div key={i} className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                        <h5 className="text-xs font-semibold text-purple-700 mb-1">{memory.name}</h5>
+                        {memory.description && (
+                          <p className="text-xs text-gray-500 mb-2">{memory.description}</p>
+                        )}
+                        {memory.content && (
+                          <div className="text-xs text-gray-600 whitespace-pre-wrap">
+                            {memory.content.length > 100 ? `${memory.content.slice(0, 100)}...` : memory.content}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center text-gray-400 text-xs mt-8">
+                    <div className="text-2xl mb-2">📝</div>
+                    <p>暂无记忆</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 border-t border-gray-200 bg-gray-50">
+                <button
+                  onClick={fetchMemories}
+                  className="w-full px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-md text-xs font-medium transition-colors flex items-center justify-center gap-1"
+                >
+                  🔄 刷新记忆
+                </button>
               </div>
             </div>
           </div>
