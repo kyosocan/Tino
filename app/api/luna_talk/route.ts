@@ -4,6 +4,7 @@ import {
   findMarkdownByName,
   type MarkdownFile,
 } from "./lib/markdownLoader";
+import { startMemoryExtraction, readExistingMemories } from "./lib/memoryExtractor";
 
 interface LunaTalkRequestBody {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -12,7 +13,6 @@ interface LunaTalkRequestBody {
 interface AnalysisResult {
   mode: string;
   context: string;
-  reasoning: string;
 }
 
 /**
@@ -82,7 +82,6 @@ function extractJsonFromResponse(text: string): AnalysisResult | null {
     return {
       mode: parsed.mode || '',
       context: parsed.context || '',
-      reasoning: parsed.reasoning || '',
     };
   } catch {
     return null;
@@ -131,7 +130,6 @@ async function analyzeConversation(
     return {
       mode: modes[0]?.name || '中英混合引导',
       context: '',
-      reasoning: '默认选择',
     };
   }
 
@@ -184,20 +182,28 @@ async function generateReply(
     contextContent = `## ${selectedContent.name}\n${selectedContent.content}`;
   }
 
+  // 获取历史对话摘要
+  const existingMemories = readExistingMemories();
+  const historySummary = existingMemories.summary || '（无历史对话摘要）';
+
   // 构建 system prompt
   const systemPrompt = replierTemplate.content
     .replace('{{persona}}', persona ? persona.content : '你是 Luna，一个友好的英语学习伙伴。')
     .replace('{{modeContent}}', selectedMode.content)
-    .replace('{{context}}', contextContent);
+    .replace('{{context}}', contextContent)
+    .replace('{{historySummary}}', historySummary);
 
   console.log('\n========== 回复 LLM System Prompt ==========\n');
   console.log(systemPrompt);
   console.log('\n==========================================\n');
 
-  // 构建完整消息列表：system + 历史对话
+  // 只取最近3轮消息
+  const recentMessages = messages.slice(-3);
+
+  // 构建完整消息列表：system + 最近3轮对话
   const chatMessages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
-    ...messages.map(m => ({
+    ...recentMessages.map(m => ({
       role: m.role,
       content: m.content,
     })),
@@ -228,7 +234,16 @@ export async function POST(req: Request) {
     const analysis = await analyzeConversation(messages, data);
     console.log('[Luna Talk] 分析结果:', analysis);
 
-    const { reply, finalPrompt } = await generateReply(messages, analysis, data);
+    // 并行运行回复生成和记忆提取
+    const [replyResult] = await Promise.all([
+      generateReply(messages, analysis, data),
+      // 记忆提取也并行运行
+      (async () => {
+        startMemoryExtraction(messages);
+      })()
+    ]);
+
+    const { reply, finalPrompt } = replyResult;
 
     return Response.json({
       reply,

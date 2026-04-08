@@ -103,8 +103,17 @@ let cachedData: {
   persona: MarkdownFile | null;
   analyzerTemplate: MarkdownFile | null;
   replierTemplate: MarkdownFile | null;
+  memoryExtractorTemplate: MarkdownFile | null;
+  system: MarkdownFile[];
   memories: MarkdownFile[];
 } | null = null;
+
+/**
+ * 清除缓存（用于刷新记忆后）
+ */
+export function clearCache() {
+  cachedData = null;
+}
 
 /**
  * 加载所有数据文件（带缓存）
@@ -130,6 +139,8 @@ export function loadAllData() {
     persona: personaFiles[0] || null,
     analyzerTemplate: findMarkdownByName(systemFiles, '分析模板') || null,
     replierTemplate: findMarkdownByName(systemFiles, '回复模板') || null,
+    memoryExtractorTemplate: findMarkdownByName(systemFiles, '记忆提取模板') || null,
+    system: systemFiles,
     memories,
   };
 
@@ -139,6 +150,6 @@ export function loadAllData() {
 /**
  * 获取所有话题和日记合并（用于分析阶段）
  */
-export function getAllTopicsAndDiaries(data: ReturnType<typeof loadAllData>): MarkdownFile[] {
+export function getAllTopicsAndDiaries(data: NonNullable<ReturnType<typeof loadAllData>>): MarkdownFile[] {
   return [...data.topics, ...data.diaries];
 }
