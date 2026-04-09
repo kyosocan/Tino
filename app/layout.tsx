@@ -22,7 +22,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN">
-      <body className="font-sans bg-[#e8e4de] antialiased">
+      <body
+        className="font-sans bg-[#e8e4de] antialiased"
+        suppressHydrationWarning
+      >
         <div className="h-dvh w-full flex items-center justify-center bg-[#e8e4de]">
           {children}
         </div>

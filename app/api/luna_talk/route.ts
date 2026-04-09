@@ -4,10 +4,18 @@ import {
   findMarkdownByName,
   type MarkdownFile,
 } from "./lib/markdownLoader";
-import { startMemoryExtraction, readExistingMemories } from "./lib/memoryExtractor";
+import {
+  startMemoryExtraction,
+  readExistingMemories,
+  resolveMemoryDir,
+  isValidMemorySandboxKey,
+  LUNA_DEFAULT_MEMORY_DIR,
+} from "./lib/memoryExtractor";
 
 interface LunaTalkRequestBody {
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  /** 自动测试专用：隔离记忆目录，不传则使用普通用户记忆 */
+  memorySandbox?: string;
 }
 
 interface AnalysisResult {
@@ -105,7 +113,8 @@ async function analyzeConversation(
     ? messages[messages.length - 1].content
     : '';
 
-  const historyMessages = messages.slice(0, -1);
+  // 分析模型只参考最近3轮历史消息
+  const historyMessages = messages.slice(0, -1).slice(-3);
 
   const analysisPrompt = analyzerTemplate.content
     .replace('{{modes}}', formatModesForAnalysis(modes))
@@ -153,9 +162,10 @@ async function analyzeConversation(
  * 调用回复 LLM
  */
 async function generateReply(
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
   analysis: AnalysisResult,
-  data: ReturnType<typeof loadAllData>
+  data: ReturnType<typeof loadAllData>,
+  memoryDir: string
 ): Promise<{ reply: string; finalPrompt: string }> {
   const { modes, topics, diaries, skills, persona, replierTemplate } = data;
 
@@ -183,8 +193,8 @@ async function generateReply(
   }
 
   // 获取历史对话摘要
-  const existingMemories = readExistingMemories();
-  const historySummary = existingMemories.summary || '（无历史对话摘要）';
+  const existingMemories = readExistingMemories(memoryDir);
+  const historySummary = existingMemories.summary || "（无历史对话摘要）";
 
   // 构建 system prompt
   const systemPrompt = replierTemplate.content
@@ -215,32 +225,40 @@ async function generateReply(
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json() as LunaTalkRequestBody;
+    const body = (await req.json()) as LunaTalkRequestBody;
     const messages = body.messages || [];
 
     if (messages.length === 0) {
-      return Response.json(
-        { error: '消息列表不能为空' },
-        { status: 400 }
-      );
+      return Response.json({ error: "消息列表不能为空" }, { status: 400 });
     }
+
+    if (body.memorySandbox !== undefined && body.memorySandbox !== null) {
+      const sk = String(body.memorySandbox).trim();
+      if (sk.length > 0 && !isValidMemorySandboxKey(sk)) {
+        return Response.json({ error: "memorySandbox 格式无效" }, { status: 400 });
+      }
+    }
+
+    const memoryDir = resolveMemoryDir(
+      typeof body.memorySandbox === "string" ? body.memorySandbox.trim() || null : null
+    );
+    const isSandbox = memoryDir !== LUNA_DEFAULT_MEMORY_DIR;
 
     const data = loadAllData();
 
-    console.log('\n==========================================');
-    console.log('🚀 开始两阶段对话处理');
-    console.log('==========================================\n');
+    console.log("\n==========================================");
+    console.log("🚀 开始两阶段对话处理");
+    if (isSandbox) console.log("📦 使用记忆沙箱（自动测试）:", memoryDir);
+    console.log("==========================================\n");
 
     const analysis = await analyzeConversation(messages, data);
-    console.log('[Luna Talk] 分析结果:', analysis);
+    console.log("[Luna Talk] 分析结果:", analysis);
 
-    // 并行运行回复生成和记忆提取
     const [replyResult] = await Promise.all([
-      generateReply(messages, analysis, data),
-      // 记忆提取也并行运行
+      generateReply(messages, analysis, data, memoryDir),
       (async () => {
-        startMemoryExtraction(messages);
-      })()
+        startMemoryExtraction(messages, memoryDir);
+      })(),
     ]);
 
     const { reply, finalPrompt } = replyResult;

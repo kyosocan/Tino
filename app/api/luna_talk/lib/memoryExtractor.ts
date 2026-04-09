@@ -1,11 +1,34 @@
 import { callDoubao, type ChatMessage } from "@/scripts/ai_api/doubao";
-import {
-  loadAllData,
-  parseMarkdownFile,
-  type MarkdownFile,
-} from "./markdownLoader";
-import fs from 'fs';
-import path from 'path';
+import { loadAllData, parseMarkdownFile } from "./markdownLoader";
+import fs from "fs";
+import path from "path";
+
+/** 普通对话记忆目录（data/记忆） */
+export const LUNA_DEFAULT_MEMORY_DIR = path.join(
+  process.cwd(),
+  "app",
+  "api",
+  "luna_talk",
+  "data",
+  "记忆"
+);
+
+/** 自动测试隔离记忆的 key：仅允许安全字符，防止路径穿越 */
+export function isValidMemorySandboxKey(key: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,96}$/.test(key);
+}
+
+/**
+ * 解析记忆目录：无 key 或非法 key → 默认生产目录；合法 key → .sandbox/<key>/（按需创建）
+ */
+export function resolveMemoryDir(sandboxKey?: string | null): string {
+  if (typeof sandboxKey !== "string") return LUNA_DEFAULT_MEMORY_DIR;
+  const key = sandboxKey.trim();
+  if (!key || !isValidMemorySandboxKey(key)) return LUNA_DEFAULT_MEMORY_DIR;
+  const dir = path.join(LUNA_DEFAULT_MEMORY_DIR, ".sandbox", key);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 interface ExtractedMemory {
   persona: string;
@@ -15,23 +38,20 @@ interface ExtractedMemory {
 /**
  * 读取现有的记忆文件
  */
-export function readExistingMemories(): {
+export function readExistingMemories(memoryDir: string = LUNA_DEFAULT_MEMORY_DIR): {
   persona: string;
   summary: string;
 } {
-  const data = loadAllData();
-  const memoriesDir = path.join(process.cwd(), 'app', 'api', 'luna_talk', 'data', '记忆');
+  let persona = "";
+  let summary = "";
 
-  let persona = '';
-  let summary = '';
-
-  const personaFile = path.join(memoriesDir, '用户画像.md');
+  const personaFile = path.join(memoryDir, "用户画像.md");
   if (fs.existsSync(personaFile)) {
     const parsed = parseMarkdownFile(personaFile);
     if (parsed) persona = parsed.content;
   }
 
-  const summaryFile = path.join(memoriesDir, '摘要.md');
+  const summaryFile = path.join(memoryDir, "摘要.md");
   if (fs.existsSync(summaryFile)) {
     const parsed = parseMarkdownFile(summaryFile);
     if (parsed) summary = parsed.content;
@@ -109,9 +129,8 @@ async function extractMemoriesWithLLM(
 /**
  * 写入记忆文件
  */
-function writeMemoryFile(name: string, content: string) {
-  const memoriesDir = path.join(process.cwd(), 'app', 'api', 'luna_talk', 'data', '记忆');
-  const filePath = path.join(memoriesDir, `${name}.md`);
+function writeMemoryFile(name: string, content: string, memoryDir: string) {
+  const filePath = path.join(memoryDir, `${name}.md`);
 
   const frontmatter = `---
 name: ${name}
@@ -134,32 +153,35 @@ ${content}
  * 异步提取并保存记忆（不阻塞回复）
  */
 export async function extractAndSaveMemoriesAsync(
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  memoryDir: string = LUNA_DEFAULT_MEMORY_DIR
 ): Promise<void> {
   try {
-    console.log('\n=========================================');
-    console.log('🧠 开始异步记忆提取');
-    console.log('=========================================\n');
+    console.log("\n=========================================");
+    console.log("🧠 开始异步记忆提取");
+    if (memoryDir !== LUNA_DEFAULT_MEMORY_DIR) {
+      console.log("[Memory Extractor] 沙箱目录:", memoryDir);
+    }
+    console.log("=========================================\n");
 
-    const existingMemories = readExistingMemories();
+    const existingMemories = readExistingMemories(memoryDir);
     const extracted = await extractMemoriesWithLLM(messages, existingMemories);
 
     if (!extracted) {
-      console.log('[Memory Extractor] 记忆提取失败，使用现有内容');
+      console.log("[Memory Extractor] 记忆提取失败，使用现有内容");
       return;
     }
 
-    // 写入两个记忆文件
     if (extracted.persona) {
-      writeMemoryFile('用户画像', extracted.persona);
+      writeMemoryFile("用户画像", extracted.persona, memoryDir);
     }
     if (extracted.summary) {
-      writeMemoryFile('摘要', extracted.summary);
+      writeMemoryFile("摘要", extracted.summary, memoryDir);
     }
 
-    console.log('[Memory Extractor] 记忆提取完成');
+    console.log("[Memory Extractor] 记忆提取完成");
   } catch (error) {
-    console.error('[Memory Extractor] 记忆提取出错:', error);
+    console.error("[Memory Extractor] 记忆提取出错:", error);
   }
 }
 
@@ -167,10 +189,10 @@ export async function extractAndSaveMemoriesAsync(
  * 启动异步记忆提取（不等待结果）
  */
 export function startMemoryExtraction(
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  memoryDir: string = LUNA_DEFAULT_MEMORY_DIR
 ): void {
-  // 启动异步任务，不等待
-  extractAndSaveMemoriesAsync(messages).catch(error => {
-    console.error('[Memory Extractor] 后台任务出错:', error);
+  extractAndSaveMemoriesAsync(messages, memoryDir).catch((error) => {
+    console.error("[Memory Extractor] 后台任务出错:", error);
   });
 }

@@ -35,3 +35,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Luna Talk 自动测试隔离记忆（不落库）
+app/api/luna_talk/data/记忆/.sandbox/
