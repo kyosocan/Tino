@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "generate-tts": "tsx scripts/generate_tts.ts"
   },
   "dependencies": {
     "html2canvas": "^1.4.1",
@@ -16,6 +17,8 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "dotenv": "^16.4.5",
+    "tsx": "^4.19.2",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -3,10 +3,27 @@ import { randomUUID } from "crypto";
 export type TtsInput = {
   text?: string;
   voiceType?: string;
+  /** 音频编码，如 mp3 / wav / pcm / ogg_opus；不传则用环境变量或默认 mp3 */
+  encoding?: string;
+  /** 采样率 Hz，如 16000；不传则用环境变量或默认 24000 */
+  rate?: number;
 };
 
+function mimeTypeForEncoding(encoding: string): string {
+  switch (encoding) {
+    case "wav":
+      return "audio/wav";
+    case "pcm":
+      return "audio/pcm";
+    case "ogg_opus":
+      return "audio/ogg";
+    default:
+      return "audio/mpeg";
+  }
+}
+
 export async function synthesizeTts(input: TtsInput) {
-  const { text, voiceType } = input;
+  const { text, voiceType, encoding: encodingOverride, rate: rateOverride } = input;
   if (!text) {
     throw new Error("text 不能为空");
   }
@@ -20,9 +37,14 @@ export async function synthesizeTts(input: TtsInput) {
     (voiceType && voiceType.trim()) ||
     process.env.TTS_VOICE_TYPE ||
     "en_male_tim_uranus_bigtts";
-  const encoding = process.env.TTS_ENCODING || "mp3";
+  const encoding =
+    (encodingOverride && encodingOverride.trim()) ||
+    process.env.TTS_ENCODING ||
+    "mp3";
   const speedRatio = Number(process.env.TTS_SPEED_RATIO || "1");
-  const rate = Number(process.env.TTS_RATE || "24000");
+  const rate =
+    rateOverride ??
+    Number(process.env.TTS_RATE || "24000");
 
   if (!appId || !token) {
     throw new Error("缺少 TTS_APP_ID / TTS_TOKEN");
@@ -67,6 +89,6 @@ export async function synthesizeTts(input: TtsInput) {
 
   return {
     audioBase64: data.data,
-    mimeType: encoding === "wav" ? "audio/wav" : "audio/mpeg"
+    mimeType: mimeTypeForEncoding(encoding)
   };
 }
