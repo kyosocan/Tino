@@ -1,0 +1,35 @@
+# talker 分支：推送 / PR / 手动运行时执行构建（与 next build 自带的类型检查一致）。
+# 说明：本项目含 /api/*，无法直接静态发布到 GitHub Pages；若需线上站点请用 Vercel、
+# Cloudflare Workers、自有 Node 主机等，并在对应 workflow 里增加部署步骤。
+
+name: Talker CI
+
+on:
+  push:
+    branches:
+      - talker
+  pull_request:
+    branches:
+      - talker
+  workflow_dispatch:
+
+concurrency:
+  group: talker-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
