@@ -19,6 +19,8 @@ interface ChatMessage {
 interface AnalysisResult {
   mode: string;
   context: string;
+  languageLevel?: string;
+  socialStyle?: string;
 }
 
 interface TestProfile {
@@ -127,7 +129,12 @@ export default function LunaTalkTestRunner({ fullPage = false }: LunaTalkTestRun
     const data = await res.json();
     return {
       reply: data.reply,
-      analysis: data.analysis ?? { mode: "—", context: "" },
+      analysis: data.analysis ?? {
+        mode: "—",
+        context: "",
+        languageLevel: "—",
+        socialStyle: "—",
+      },
     };
   };
 
@@ -202,7 +209,7 @@ export default function LunaTalkTestRunner({ fullPage = false }: LunaTalkTestRun
         conversationHistory.push({ role: "assistant", content: lunaResult.reply });
         addLog(`🌙 Luna: ${lunaResult.reply}`);
         addLog(
-          `   [模式: ${lunaResult.analysis.mode}, 内容: ${lunaResult.analysis.context || "无"}]`
+          `   [等级: ${lunaResult.analysis.languageLevel || "—"}, 类型: ${lunaResult.analysis.socialStyle || "—"}, 模式: ${lunaResult.analysis.mode}, 内容: ${lunaResult.analysis.context || "无"}]`
         );
 
         if (i < maxTurns - 1) {

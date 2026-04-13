@@ -13,6 +13,8 @@ interface ChatMessage {
 interface AnalysisResult {
   mode: string;
   context: string;
+  languageLevel?: string;
+  socialStyle?: string;
 }
 
 interface MemoryItem {
@@ -25,6 +27,12 @@ interface TestChatPanelProps {
   defaultOpen?: boolean;
   onTestComplete?: (results: any) => void;
 }
+
+const SOCIAL_STYLE_LABELS: Record<string, string> = {
+  S1: '害羞型',
+  S2: '调皮型',
+  S3: '主动型',
+};
 
 export default function TestChatPanel({ defaultOpen = true, onTestComplete }: TestChatPanelProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
@@ -300,6 +308,38 @@ export default function TestChatPanel({ defaultOpen = true, onTestComplete }: Te
                       {currentAnalysis ? (
                         <span className="text-sm font-medium text-gray-800">
                           {currentAnalysis.mode}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-400">发送消息后显示</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-semibold text-purple-700 mb-2 flex items-center gap-1">
+                      📈 英语等级
+                    </h4>
+                    <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                      {currentAnalysis ? (
+                        <span className="text-sm font-medium text-gray-800">
+                          {currentAnalysis.languageLevel || '—'}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-400">发送消息后显示</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-semibold text-purple-700 mb-2 flex items-center gap-1">
+                      🧠 互动类型
+                    </h4>
+                    <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                      {currentAnalysis ? (
+                        <span className="text-sm font-medium text-gray-800">
+                          {currentAnalysis.socialStyle
+                            ? `${currentAnalysis.socialStyle} ${SOCIAL_STYLE_LABELS[currentAnalysis.socialStyle] || ''}`.trim()
+                            : '—'}
                         </span>
                       ) : (
                         <span className="text-xs text-gray-400">发送消息后显示</span>

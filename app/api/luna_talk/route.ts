@@ -21,7 +21,12 @@ interface LunaTalkRequestBody {
 interface AnalysisResult {
   mode: string;
   context: string;
+  languageLevel?: string;
+  socialStyle?: string;
 }
+
+const VALID_LANGUAGE_LEVELS = new Set(["L0", "L1", "L2", "L3"]);
+const VALID_SOCIAL_STYLES = new Set(["S1", "S2", "S3"]);
 
 /**
  * 格式化模式列表供分析 LLM 使用
@@ -87,9 +92,17 @@ function extractJsonFromResponse(text: string): AnalysisResult | null {
   try {
     const jsonStr = jsonMatch[1] || jsonMatch[0];
     const parsed = JSON.parse(jsonStr) as Partial<AnalysisResult>;
+    const languageLevel = VALID_LANGUAGE_LEVELS.has(parsed.languageLevel || "")
+      ? parsed.languageLevel
+      : "L0";
+    const socialStyle = VALID_SOCIAL_STYLES.has(parsed.socialStyle || "")
+      ? parsed.socialStyle
+      : "S1";
     return {
       mode: parsed.mode || '',
       context: parsed.context || '',
+      languageLevel,
+      socialStyle,
     };
   } catch {
     return null;
@@ -139,6 +152,8 @@ async function analyzeConversation(
     return {
       mode: modes[0]?.name || '中英混合引导',
       context: '',
+      languageLevel: 'L0',
+      socialStyle: 'S1',
     };
   }
 

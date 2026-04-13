@@ -15,6 +15,8 @@ interface ChatTurn {
   analysis?: {
     mode: string;
     context: string;
+    languageLevel?: string;
+    socialStyle?: string;
   };
 }
 
@@ -115,7 +117,9 @@ async function runTest(profile: TestProfile, maxTurns: number = 6): Promise<Test
 
     console.log(`🌙 Luna: ${lunaReply}`);
     if (lunaAnalysis) {
-      console.log(`   [模式: ${lunaAnalysis.mode}, 内容: ${lunaAnalysis.context || '无'}]`);
+      console.log(
+        `   [等级: ${lunaAnalysis.languageLevel || '—'}, 类型: ${lunaAnalysis.socialStyle || '—'}, 模式: ${lunaAnalysis.mode}, 内容: ${lunaAnalysis.context || '无'}]`
+      );
     }
 
     // 记录这一轮
