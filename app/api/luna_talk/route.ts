@@ -25,14 +25,22 @@ interface AnalysisResult {
   socialStyle?: string;
 }
 
-const VALID_LANGUAGE_LEVELS = new Set(["L0", "L1", "L2", "L3"]);
-const VALID_SOCIAL_STYLES = new Set(["S1", "S2", "S3"]);
+function deriveClassificationFromMode(mode: string): Pick<AnalysisResult, "languageLevel" | "socialStyle"> {
+  const match = mode.match(/(L[0-3])\s*[-+_ ]\s*(S[1-3])/);
+  if (!match) return {};
+  return {
+    languageLevel: match[1],
+    socialStyle: match[2],
+  };
+}
 
 /**
  * 格式化模式列表供分析 LLM 使用
  */
 function formatModesForAnalysis(modes: MarkdownFile[]): string {
+  const referenceModeNames = new Set(["中英混合引导", "纯英文引导", "纯英文响应"]);
   return modes
+    .filter((m) => !referenceModeNames.has(m.name))
     .map((m, i) => `${i + 1}. ${m.name}\n   ${m.description}`)
     .join('\n\n');
 }
@@ -92,17 +100,9 @@ function extractJsonFromResponse(text: string): AnalysisResult | null {
   try {
     const jsonStr = jsonMatch[1] || jsonMatch[0];
     const parsed = JSON.parse(jsonStr) as Partial<AnalysisResult>;
-    const languageLevel = VALID_LANGUAGE_LEVELS.has(parsed.languageLevel || "")
-      ? parsed.languageLevel
-      : "L0";
-    const socialStyle = VALID_SOCIAL_STYLES.has(parsed.socialStyle || "")
-      ? parsed.socialStyle
-      : "S1";
     return {
       mode: parsed.mode || '',
       context: parsed.context || '',
-      languageLevel,
-      socialStyle,
     };
   } catch {
     return null;
@@ -149,11 +149,11 @@ async function analyzeConversation(
   const result = extractJsonFromResponse(response);
 
   if (!result) {
+    const fallbackMode = modes[0]?.name || 'L0-S1 零基础害羞型中英混合引导';
     return {
-      mode: modes[0]?.name || '中英混合引导',
+      mode: fallbackMode,
       context: '',
-      languageLevel: 'L0',
-      socialStyle: 'S1',
+      ...deriveClassificationFromMode(fallbackMode),
     };
   }
 
@@ -162,6 +162,7 @@ async function analyzeConversation(
   if (!modeExists && modes.length > 0) {
     result.mode = modes[0].name;
   }
+  Object.assign(result, deriveClassificationFromMode(result.mode));
 
   // 验证 context 是否存在（在话题、日记或技能中）
   const allContent = [...topics, ...diaries, ...skills];
